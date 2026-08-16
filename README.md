@@ -70,10 +70,47 @@ pip install -r requirements.txt
 > AstrBot 4.24.2 及以上支持插件 Pages：在插件详情 → Pages 打开「workflow-editor」，
 > 可以可视化增删工作流与输入节点、拖动排序、一键智能识别并保存，无需在聊天窗口操作。
 >
-> 扩写提示词模板存放在插件 `prompt/` 目录（已预置 `anima3_prompt_template.txt`），
-> 也可以在页面上传 / 预览 `.txt` 或 `.md` 模板并在工作流里选用。
+> 内置模板为 `prompt/anima3_prompt_template.txt`；页面上传的模板会保存到
+> AstrBot 的 `data/plugin_data/<插件目录>/prompt/`，更新插件不会丢失。
 
 
+
+### 体验工作流说明（可选）
+
+这是我在 MaiBot 插件里做的**文生图体验工作流**，已删除内部高成本「豆包提示词优化」节点，适合第一次试运行。注意：打开后不能直接使用，因为没有提示词优化节点；想体验完整原版可以去下方 UP 主视频里找。
+
+- 海外版：[海外体验工作流](https://www.runninghub.ai/zh-cn/workflow/2087492768787685378?inviteCode=bvhsaqdr)
+- 国内版：[国内体验工作流](https://www.runninghub.cn/workflow/2087939838371786753?inviteCode=8cq8uhl8)
+
+> [!NOTE]
+> 这个工作流魔改自 B 站视频 [BV1arGt6wExL](https://www.bilibili.com/video/BV1arGt6wExL)，感谢 UP 主 [@每日提钢小助手5号](https://space.bilibili.com/3690999272442168) 分享的工作流，如侵权可联系删除。UP 主原版自带提示词优化，会消耗 RunningHub 余额。
+
+> [!IMPORTANT]
+> 打开工作流并保存后，工作流 ID（链接里的数字）会变成你账号专属 ID；识别命令里要换成你保存后的 ID。
+
+导入命令（按平台二选一）：
+
+```
+/wf国外工作流 2087492768787685378 文生图
+/wf国内工作流 2087939838371786753 文生图
+```
+
+导入后做两件事：
+
+1. **只保留「提示词」节点**：在插件配置页或可视化页面的工作流里，把识别出的节点删到只剩提示词节点（海外版提示词节点是 353 号）。
+2. **启用 LLM 扩写并选择模板**：打开该工作流的「启用 LLM 扩写」，模板选择 `prompt/anima3_prompt_template.txt`。
+
+运行示例：
+
+```
+/wf运行 文生图 原神刻晴
+```
+
+设备与费用参考：
+
+- 推荐 **Standard** 设备，出图约 **2 分钟**；
+- 平均消耗约 **25 RH 币**（会员约合 **0.04 元**）；
+- **Ultra** 仅会员可用，消耗更高。
 
 ### 3. 跑一张图
 
