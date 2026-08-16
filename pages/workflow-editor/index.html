@@ -194,9 +194,15 @@ dialog::backdrop{background:var(--overlay)}
 .dialog-foot{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:14px 20px;border-top:1px solid var(--divider)}
 .analyze-box{border:1px solid var(--divider);border-radius:10px;padding:12px;background:var(--surface-2);min-height:86px}
 .analyze-box .node-chip{
-  display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0;padding:4px 9px;border-radius:7px;
+  display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0;padding:5px 9px;border-radius:7px;
   border:1px solid var(--divider);background:var(--surface);font-size:12px;
 }
+.node-chip.selectable{cursor:pointer;user-select:none}
+.node-chip.selectable:hover{border-color:var(--primary)}
+.node-chip.selectable input{width:16px;height:16px;min-height:0;accent-color:var(--primary)}
+.analyze-selectbar{display:flex;align-items:center;gap:9px;margin-bottom:9px;color:var(--muted);font-size:12px}
+.analyze-selectbar input{width:16px;height:16px;min-height:0;accent-color:var(--primary)}
+.analyze-selectbar .spacer{flex:1}
 .analyze-box .muted{color:var(--muted);font-size:12px}
 #toasts{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:80;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none;width:min(560px,calc(100vw - 32px))}
 .toast{
@@ -348,8 +354,8 @@ dialog::backdrop{background:var(--overlay)}
       </div>
     </div>
     <div class="dialog-foot" style="flex-wrap:wrap">
-      <button class="btn outlined" id="azMergeBtn" hidden><span class="icon icon-plus" style="width:16px;height:16px" aria-hidden="true"></span>仅添加缺失节点</button>
-      <button class="btn primary" id="azReplaceBtn" hidden><span class="icon icon-refresh" style="width:16px;height:16px" aria-hidden="true"></span>替换当前全部节点</button>
+      <button class="btn outlined" id="azMergeBtn" hidden><span class="icon icon-plus" style="width:16px;height:16px" aria-hidden="true"></span>添加选中节点</button>
+      <button class="btn primary" id="azReplaceBtn" hidden><span class="icon icon-refresh" style="width:16px;height:16px" aria-hidden="true"></span>替换为选中节点</button>
       <button class="btn primary" id="azRunBtn"><span class="icon icon-auto" style="width:16px;height:16px" aria-hidden="true"></span>开始识别</button>
     </div>
   </div>
@@ -832,14 +838,16 @@ async function runAnalyze() {
     analyzeState.nodes = (res.nodes || []).map(normalizeNode).filter((n) => n.node_id);
     analyzeState.method = res.method || "";
     $("azResult").innerHTML = analyzeState.nodes.length
-      ? `<div class="muted" style="margin-bottom:8px">识别方式：${esc(analyzeState.method)} · 共 ${analyzeState.nodes.length} 个节点</div>` +
-        analyzeState.nodes.map((n) =>
-          `<span class="node-chip">${esc(n.node_id)} · ${esc(n.field_name)} · ${esc(typeMeta(effectiveType(n)).label)}${n.label ? ` · ${esc(n.label)}` : ""}</span>`
+      ? `<div class="muted" style="margin-bottom:8px">识别方式：${esc(analyzeState.method)} · 共 ${analyzeState.nodes.length} 个候选节点</div>` +
+        `<div class="analyze-selectbar"><label><input type="checkbox" id="azSelectAll" checked> 全选</label><span class="spacer"></span><span id="azSelectedCount"></span></div>` +
+        analyzeState.nodes.map((n, i) =>
+          `<label class="node-chip selectable"><input type="checkbox" data-az-node="${i}" checked> ${esc(n.node_id)} · ${esc(n.field_name)} · ${esc(typeMeta(effectiveType(n)).label)}${n.label ? ` · ${esc(n.label)}` : ""}</label>`
         ).join("")
       : '<div class="muted">没有识别到可编辑输入节点。</div>';
     $("azReplaceBtn").hidden = analyzeState.nodes.length === 0;
     $("azMergeBtn").hidden = analyzeState.nodes.length === 0;
-    toast(`识别完成：${analyzeState.nodes.length} 个节点`, "ok");
+    updateAnalyzeSelection();
+    toast(`识别完成：${analyzeState.nodes.length} 个候选节点，请勾选要添加的节点`, "ok");
   } catch (err) {
     $("azResult").innerHTML = `<div class="muted" style="color:var(--danger)">${esc(String(err?.message || err))}</div>`;
     $("azReplaceBtn").hidden = true;
@@ -851,14 +859,33 @@ async function runAnalyze() {
   }
 }
 
+function selectedAnalyzeNodes() {
+  const checks = Array.from($("azResult").querySelectorAll('input[data-az-node]'));
+  return analyzeState.nodes.filter((_, index) => checks[index]?.checked);
+}
+
+function updateAnalyzeSelection() {
+  const checks = Array.from($("azResult").querySelectorAll('input[data-az-node]'));
+  const checked = checks.filter((item) => item.checked).length;
+  const count = $("azSelectedCount");
+  if (count) count.textContent = `已选 ${checked} / ${analyzeState.nodes.length}`;
+  $("azReplaceBtn").hidden = checked === 0 || analyzeState.nodes.length === 0;
+  $("azMergeBtn").hidden = checked === 0 || analyzeState.nodes.length === 0;
+}
+
 function applyAnalyze(mode) {
   const wf = state.workflows[analyzeState.wf];
-  if (!wf || !analyzeState.nodes.length) return;
+  if (!wf) return;
+  const selected = selectedAnalyzeNodes();
+  if (!selected.length) {
+    toast("请先勾选要添加的节点", "warn");
+    return;
+  }
   mutate(() => {
     if (mode === "replace") {
-      wf.nodes = clone(analyzeState.nodes);
+      wf.nodes = clone(selected);
     } else {
-      for (const node of analyzeState.nodes) {
+      for (const node of selected) {
         const index = wf.nodes.findIndex((n) => n.node_id === node.node_id && n.field_name === node.field_name);
         if (index >= 0) wf.nodes[index] = node;
         else wf.nodes.push(node);
@@ -866,7 +893,7 @@ function applyAnalyze(mode) {
     }
   });
   $("analyzeDialog").close();
-  toast(mode === "replace" ? "已替换为识别结果" : "已合并识别结果", "ok");
+  toast(mode === "replace" ? "已替换为选中节点" : `已添加 ${selected.length} 个选中节点`, "ok");
 }
 
 function openAnalyzeDialog(wfIndex) {
@@ -981,6 +1008,14 @@ document.addEventListener("dragend", () => {
 $("workflowSaveBtn").addEventListener("click", saveWorkflowFromDialog);
 $("nodeSaveBtn").addEventListener("click", saveNodeFromDialog);
 $("azRunBtn").addEventListener("click", runAnalyze);
+$("azResult").addEventListener("change", (event) => {
+  if (event.target.id === "azSelectAll") {
+    $("azResult").querySelectorAll('input[data-az-node]').forEach((item) => {
+      item.checked = event.target.checked;
+    });
+  }
+  updateAnalyzeSelection();
+});
 $("azReplaceBtn").addEventListener("click", () => applyAnalyze("replace"));
 $("azMergeBtn").addEventListener("click", () => applyAnalyze("merge"));
 $("addWorkflowBtn").addEventListener("click", () => openWorkflowDialog(-1));
