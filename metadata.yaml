@@ -3,6 +3,7 @@ desc: 麦麦画师 · RunningHub：从一句话文生图，到多参考图 / 视
 author: 锦瑟
 version: 2.0.4
 repo: https://github.com/achenjins/astrbot_plugin_runninghub_maimai
+social_link: https://github.com/achenjins
 display_name: 麦麦画师 · RunningHub
 short_desc: RunningHub 通用工作流适配：文生图 / 参考图 / 视频生成
 support_platforms:
