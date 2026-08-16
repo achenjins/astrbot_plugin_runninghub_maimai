@@ -2657,6 +2657,7 @@ class RunningHubGenericPlugin(Star):
             )
         return {
             "workflows": workflows,
+            "prompt_templates": self._list_prompt_templates(),
             "use_llm": bool(self.config.feature.use_llm),
             "max_nodes": _MAX_NODES,
             "max_workflows": 20,
@@ -2897,7 +2898,12 @@ class RunningHubGenericPlugin(Star):
         )
 
     async def handle_page_upload_prompt_template(self):
-        """可视化页面 API：上传扩写提示词模板到 prompt/ 目录。"""
+        """可视化页面 API：上传扩写提示词模板到 prompt/ 目录。
+
+        同时支持两种前端上传方式：
+        - AstrBot 页面桥的 multipart/form-data（bridge.upload）；
+        - 普通 JSON（apiPost，filename + content），作为网络异常时的兜底。
+        """
         is_quart = True
         try:
             from quart import request as web_request
@@ -2905,22 +2911,48 @@ class RunningHubGenericPlugin(Star):
             is_quart = False
             from flask import request as web_request
         try:
-            files = await web_request.files if is_quart else web_request.files
-            uploaded = files.get("file")
-            if uploaded is None:
-                return self._web_jsonify({"success": False, "message": "没有收到文件，请使用 multipart/form-data 上传"})
-            raw_name = str(getattr(uploaded, "filename", "") or "").strip()
-            filename = Path(raw_name).name
-            if not filename or filename in {".", ".."}:
-                return self._web_jsonify({"success": False, "message": "文件名不合法"})
-            target = self._safe_prompt_template(filename)
-            if target is None:
-                return self._web_jsonify({"success": False, "message": "仅支持 .txt / .md 模板文件"})
-            existed = target.exists()
-            if is_quart:
-                await uploaded.save(target)
+            content_type = str(getattr(web_request, "content_type", "") or "").lower()
+            if "multipart/form-data" in content_type:
+                if is_quart:
+                    files = await web_request.files
+                else:
+                    files = web_request.files
+                uploaded = files.get("file")
+                if uploaded is None:
+                    return self._web_jsonify(
+                        {"success": False, "message": "没有收到文件，请使用 multipart/form-data 上传"}
+                    )
+                raw_name = str(getattr(uploaded, "filename", "") or "").strip()
+                filename = Path(raw_name).name
+                if not filename or filename in {".", ".."}:
+                    return self._web_jsonify({"success": False, "message": "文件名不合法"})
+                target = self._safe_prompt_template(filename)
+                if target is None:
+                    return self._web_jsonify({"success": False, "message": "仅支持 .txt / .md 模板文件"})
+                existed = target.exists()
+                if is_quart:
+                    await uploaded.save(target)
+                else:
+                    uploaded.save(target)
             else:
-                uploaded.save(target)
+                if is_quart:
+                    payload = await web_request.get_json(silent=True) or {}
+                else:
+                    payload = web_request.get_json(silent=True) or {}
+                raw_name = str(payload.get("filename") or "").strip()
+                content = payload.get("content")
+                filename = Path(raw_name).name
+                if not filename or filename in {".", ".."}:
+                    return self._web_jsonify({"success": False, "message": "文件名不合法"})
+                target = self._safe_prompt_template(filename)
+                if target is None:
+                    return self._web_jsonify({"success": False, "message": "仅支持 .txt / .md 模板文件"})
+                if not isinstance(content, str) or not content.strip():
+                    return self._web_jsonify({"success": False, "message": "模板内容不能为空"})
+                if len(content.encode("utf-8")) > 2 * 1024 * 1024:
+                    return self._web_jsonify({"success": False, "message": "文件超过 2MB"})
+                existed = target.exists()
+                target.write_text(content, encoding="utf-8")
         except Exception as exc:  # pragma: no cover
             self.logger.error("[页面] 上传模板失败: %s", exc, exc_info=True)
             return self._web_jsonify({"success": False, "message": f"上传失败: {exc}"})
@@ -2952,6 +2984,7 @@ class RunningHubGenericPlugin(Star):
                 },
             }
         )
+
 
     async def handle_run_workflow_api(self):
         """Web API：运行配置好的 RunningHub 工作流（供其他插件 / WebUI 调用）。"""

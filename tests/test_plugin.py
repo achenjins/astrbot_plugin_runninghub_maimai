@@ -511,6 +511,10 @@ def test_page_config_payload_exposes_workflow_nodes(
     assert payload["workflows"][0]["name"] == "可视化"
     assert payload["workflows"][0]["nodes"][0]["node_id"] == "353"
     assert payload["workflows"][0]["nodes"][0]["effective_type"] == "prompt"
+    assert any(
+        item["path"] == "prompt/anima3_prompt_template.txt"
+        for item in payload["prompt_templates"]
+    )
 
 
 def test_page_workflow_payload_validation(

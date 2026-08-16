@@ -604,11 +604,12 @@ async function loadTemplates() {
   try {
     const res = await bridge.apiGet("page/prompt-templates");
     if (res && res.success !== false && res.data) {
-      state.templates = Array.isArray(res.data.templates) ? clone(res.data.templates) : [];
+      const list = Array.isArray(res.data.templates) ? clone(res.data.templates) : [];
+      if (list.length) state.templates = list;
     }
   } catch (err) {
-    state.templates = [];
-    toast(`读取模板列表失败：${err?.message || err}`, "warn", 4200);
+    // page/config 已附带模板列表，这里刷新失败时保留已有数据即可。
+    console.warn("读取模板列表失败：", err);
   }
 }
 
@@ -619,7 +620,19 @@ async function uploadTemplate(file) {
     return;
   }
   try {
-    const res = await bridge.upload("page/prompt-templates", file);
+    let res;
+    try {
+      res = await bridge.upload("page/prompt-templates", file);
+    } catch (uploadErr) {
+      // bridge.upload 在部分 AstrBot 版本 / 网络环境下会抛 NetworkError，
+      // 这里退化为 JSON 上传，后端同样支持。
+      console.warn("bridge.upload failed, fallback to JSON upload:", uploadErr);
+      const content = await file.text();
+      res = await bridge.apiPost("page/prompt-templates", {
+        filename: file.name,
+        content,
+      });
+    }
     if (!res || res.success === false) throw new Error(res?.message || "上传失败");
     await loadTemplates();
     const path = res.data?.path || "";
@@ -755,6 +768,7 @@ async function loadConfig() {
   if (!res || res.success === false) throw new Error(res?.message || "读取配置失败");
   const data = res.data || res;
   state.workflows = Array.isArray(data.workflows) ? clone(data.workflows) : [];
+  if (Array.isArray(data.prompt_templates)) state.templates = clone(data.prompt_templates);
   state.original = clone(state.workflows);
   state.loading = false;
   setDirty(false);
