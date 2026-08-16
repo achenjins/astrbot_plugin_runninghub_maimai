@@ -667,3 +667,19 @@ def test_template_list_merges_files_from_plugin_dir(
     monkeypatch.setattr(plugin_main, "_PLUGIN_DIR", fake_plugin)
     paths = [item["path"] for item in star._list_prompt_templates()]
     assert "prompt/manual_ref2va.md" in paths
+
+def test_load_llm_template_from_persistent_dir_with_prompt_prefix(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    directory = star._prompt_templates_dir()
+    target = directory / "load_test_template.md"
+    target.write_text("PERSISTED_TEMPLATE", encoding="utf-8")
+    try:
+        workflow = plugin_main.WorkflowItemSection(
+            name="读取测试",
+            workflow_id="1",
+            llm_template_path="prompt/load_test_template.md",
+        )
+        assert star._load_llm_template(workflow) == "PERSISTED_TEMPLATE"
+    finally:
+        target.unlink(missing_ok=True)

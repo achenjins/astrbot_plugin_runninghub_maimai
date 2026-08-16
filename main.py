@@ -662,7 +662,10 @@ class RunningHubGenericPlugin(Star):
         if not resolved.is_absolute():
             # 配置值仍是相对路径：优先读用户持久化目录（更新不丢失），
             # 找不到时回退到插件自带的 prompt/ 目录。
-            user_resolved = self._prompt_templates_dir() / resolved
+            relative = str(resolved).replace("\\", "/")
+            if relative.startswith("prompt/"):
+                relative = relative[len("prompt/"):]
+            user_resolved = self._prompt_templates_dir() / relative
             resolved = user_resolved if user_resolved.is_file() else (_PLUGIN_DIR / resolved)
         try:
             return resolved.read_text(encoding="utf-8")
