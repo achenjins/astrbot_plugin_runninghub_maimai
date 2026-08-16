@@ -41,8 +41,10 @@ pip install -r requirements.txt
 
 ### 1. 注册并填写 API Key
 
-1. 打开 [国内站](https://www.runninghub.cn?inviteCode=8cq8uhl8) 或 [海外站](https://www.runninghub.ai?inviteCode=bvhsaqdr) 注册。
-2. 在对应平台的 API 页面复制 API Key。
+1. 打开 [国内站](https://www.runninghub.cn?inviteCode=8cq8uhl8) 或 [海外站](https://www.runninghub.ai?inviteCode=bvhsaqdr) 注册（链接已带邀请码）。
+2. 打开对应平台的 API 页面复制 API Key：
+   - 海外 API 页面：<https://www.runninghub.ai/enterprise-api/consumerApi?inviteCode=bvhsaqdr>
+   - 国内 API 页面：<https://www.runninghub.cn/enterprise-api/consumerApi?inviteCode=8cq8uhl8>
 3. 打开 AstrBot 插件配置页，填入「国内 API Key」或「国外 API Key」。
 
 > [!TIP]
@@ -67,6 +69,9 @@ pip install -r requirements.txt
 > [!TIP]
 > AstrBot 4.24.2 及以上支持插件 Pages：在插件详情 → Pages 打开「workflow-editor」，
 > 可以可视化增删工作流与输入节点、拖动排序、一键智能识别并保存，无需在聊天窗口操作。
+>
+> 扩写提示词模板存放在插件 `prompt/` 目录（已预置 `anima3_prompt_template.txt`），
+> 也可以在页面上传 / 预览 `.txt` 或 `.md` 模板并在工作流里选用。
 
 
 

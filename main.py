@@ -431,6 +431,24 @@ class RunningHubGenericPlugin(Star):
             ["POST"],
             "可视化页面：拉取并识别工作流输入节点",
         )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/prompt-templates",
+            self.handle_page_list_prompt_templates,
+            ["GET"],
+            "可视化页面：列出扩写提示词模板",
+        )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/prompt-templates",
+            self.handle_page_upload_prompt_template,
+            ["POST"],
+            "可视化页面：上传扩写提示词模板",
+        )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/prompt-template",
+            self.handle_page_read_prompt_template,
+            ["GET"],
+            "可视化页面：读取扩写提示词模板内容",
+        )
 
         self.logger.info(
             "麦麦画师插件已加载：base_url=%s 工作流数量=%d",
@@ -2808,6 +2826,132 @@ class RunningHubGenericPlugin(Star):
         if not detected:
             return self._web_jsonify({"success": False, "message": "未识别出输入节点，请手动添加"})
         return self._web_jsonify({"success": True, "method": method, "nodes": detected})
+
+    def _prompt_templates_dir(self) -> Path:
+        """扩写提示词模板目录（相对插件目录 prompt/）。"""
+        directory = _PLUGIN_DIR / "prompt"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _safe_prompt_template(self, name: str) -> Path | None:
+        """把模板名解析为 prompt/ 目录内的安全路径（仅允许 .txt / .md）。"""
+        raw = str(name or "").strip().replace("\\", "/")
+        if not raw or raw in {".", ".."} or raw.startswith(".") or "/" in raw:
+            return None
+        if not raw.lower().endswith((".txt", ".md")):
+            return None
+        target = (self._prompt_templates_dir() / raw).resolve()
+        try:
+            target.relative_to(self._prompt_templates_dir().resolve())
+        except ValueError:
+            return None
+        return target
+
+    def _list_prompt_templates(self) -> list[dict[str, Any]]:
+        directory = self._prompt_templates_dir()
+        templates: list[dict[str, Any]] = []
+        for path in directory.iterdir():
+            if not path.is_file() or not path.name.lower().endswith((".txt", ".md")):
+                continue
+            templates.append(
+                {
+                    "name": path.name,
+                    "path": f"prompt/{path.name}",
+                    "size": path.stat().st_size,
+                    "modified": int(path.stat().st_mtime),
+                }
+            )
+        templates.sort(key=lambda item: str(item["name"]).lower())
+        return templates
+
+    async def handle_page_list_prompt_templates(self):
+        """可视化页面 API：列出扩写提示词模板。"""
+        return self._web_jsonify(
+            {"success": True, "data": {"templates": self._list_prompt_templates()}}
+        )
+
+    async def handle_page_read_prompt_template(self):
+        """可视化页面 API：读取一个扩写提示词模板内容。"""
+        try:
+            from quart import request as web_request
+        except ImportError:
+            from flask import request as web_request
+        target = self._safe_prompt_template(web_request.args.get("name", ""))
+        if target is None or not target.is_file():
+            return self._web_jsonify({"success": False, "message": "模板不存在或文件名不合法"})
+        if target.stat().st_size > 2 * 1024 * 1024:
+            return self._web_jsonify({"success": False, "message": "模板超过 2MB，无法预览"})
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return self._web_jsonify({"success": False, "message": "模板不是 UTF-8 文本，无法预览"})
+        return self._web_jsonify(
+            {
+                "success": True,
+                "data": {
+                    "name": target.name,
+                    "path": f"prompt/{target.name}",
+                    "content": content,
+                },
+            }
+        )
+
+    async def handle_page_upload_prompt_template(self):
+        """可视化页面 API：上传扩写提示词模板到 prompt/ 目录。"""
+        is_quart = True
+        try:
+            from quart import request as web_request
+        except ImportError:
+            is_quart = False
+            from flask import request as web_request
+        try:
+            files = await web_request.files if is_quart else web_request.files
+            uploaded = files.get("file")
+            if uploaded is None:
+                return self._web_jsonify({"success": False, "message": "没有收到文件，请使用 multipart/form-data 上传"})
+            raw_name = str(getattr(uploaded, "filename", "") or "").strip()
+            filename = Path(raw_name).name
+            if not filename or filename in {".", ".."}:
+                return self._web_jsonify({"success": False, "message": "文件名不合法"})
+            target = self._safe_prompt_template(filename)
+            if target is None:
+                return self._web_jsonify({"success": False, "message": "仅支持 .txt / .md 模板文件"})
+            existed = target.exists()
+            if is_quart:
+                await uploaded.save(target)
+            else:
+                uploaded.save(target)
+        except Exception as exc:  # pragma: no cover
+            self.logger.error("[页面] 上传模板失败: %s", exc, exc_info=True)
+            return self._web_jsonify({"success": False, "message": f"上传失败: {exc}"})
+        try:
+            size = target.stat().st_size
+            if size <= 0:
+                raise ValueError("文件为空")
+            if size > 2 * 1024 * 1024:
+                raise ValueError("文件超过 2MB")
+            target.read_text(encoding="utf-8")
+        except Exception as exc:  # pragma: no cover
+            try:
+                target.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return self._web_jsonify({"success": False, "message": f"模板内容不可用: {exc}"})
+        self.logger.info(
+            "[页面] 已上传扩写模板: %s（%d 字节，覆盖=%s）", target.name, size, existed
+        )
+        return self._web_jsonify(
+            {
+                "success": True,
+                "message": "模板已上传" + ("（已覆盖同名文件）" if existed else ""),
+                "data": {
+                    "name": target.name,
+                    "path": f"prompt/{target.name}",
+                    "size": size,
+                    "overwritten": existed,
+                },
+            }
+        )
 
     async def handle_run_workflow_api(self):
         """Web API：运行配置好的 RunningHub 工作流（供其他插件 / WebUI 调用）。"""

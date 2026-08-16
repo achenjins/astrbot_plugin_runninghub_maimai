@@ -169,6 +169,9 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),
 .empty .big{color:var(--primary);margin-bottom:12px}
 .empty h3{margin:0 0 6px;color:var(--text);font-size:16px;font-weight:600}
 .empty code{background:var(--surface-2);border:1px solid var(--divider);padding:1px 6px;border-radius:6px}
+.template-row{display:flex;align-items:center;gap:8px}
+.template-row select{flex:1;min-width:0}
+.preview-text{width:100%;min-height:380px;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.6}
 dialog{border:0;padding:0;border-radius:var(--radius);background:var(--surface);color:var(--text);box-shadow:0 24px 48px rgba(0,0,0,.24);width:min(560px,calc(100vw - 28px));max-height:min(86vh,820px)}
 dialog::backdrop{background:var(--overlay)}
 .dialog{display:flex;flex-direction:column;max-height:min(86vh,820px)}
@@ -276,7 +279,16 @@ dialog::backdrop{background:var(--overlay)}
         <div class="field"><label for="wfRegion">区域</label>
           <select id="wfRegion"><option value="overseas">国外 runninghub.ai</option><option value="domestic">国内 runninghub.cn</option></select>
         </div>
-        <div class="field full"><label for="wfTemplate">LLM 扩写模板路径（相对插件目录，可选）</label><input id="wfTemplate" placeholder="templates/my_template.txt"></div>
+        <div class="field full">
+          <label for="wfTemplate">LLM 扩写模板</label>
+          <div class="template-row">
+            <select id="wfTemplate"></select>
+            <button class="btn outlined small" id="wfUploadBtn" type="button"><span class="icon icon-upload" style="width:14px;height:14px" aria-hidden="true"></span>上传</button>
+            <button class="btn text small" id="wfPreviewBtn" type="button"><span class="icon icon-preview" style="width:14px;height:14px" aria-hidden="true"></span>预览</button>
+          </div>
+          <input type="file" id="wfTemplateFile" accept=".txt,.md,text/plain,text/markdown" hidden>
+          <div class="hint" id="wfTemplateHint">模板存放在插件 prompt/ 目录，上传成功后会自动选中。</div>
+        </div>
         <div class="field full"><label class="check-row"><input type="checkbox" id="wfEnhance"> 启用 LLM 提示词扩写</label></div>
       </div>
     </div>
@@ -339,6 +351,14 @@ dialog::backdrop{background:var(--overlay)}
   </div>
 </dialog>
 
+<dialog id="templatePreviewDialog">
+  <div class="dialog">
+    <div class="dialog-head"><h3 id="templatePreviewTitle">模板预览</h3><button class="icon-btn close-x" data-close="templatePreviewDialog"><span class="icon icon-close" style="width:18px;height:18px" aria-hidden="true"></span></button></div>
+    <div class="dialog-body"><textarea class="preview-text" id="templatePreviewContent" readonly></textarea></div>
+    <div class="dialog-foot"><button class="btn text" data-close="templatePreviewDialog">关闭</button></div>
+  </div>
+</dialog>
+
 <dialog id="confirmDialog">
   <div class="dialog">
     <div class="dialog-head"><h3 id="confirmTitle">确认操作</h3></div>
@@ -369,7 +389,7 @@ const TYPE_META = {
   "":      { label: "自动推断", icon: "auto", cls: "type-default", hint: "按字段名自动判断：image→图片、audio/voice→语音、video→视频，其余→文字" }
 };
 
-const state = { workflows: [], original: null, dirty: false, saving: false, loading: true, search: "", region: "all" };
+const state = { workflows: [], templates: [], original: null, dirty: false, saving: false, loading: true, search: "", region: "all" };
 let workflowDialogIndex = -1;
 let nodeDialogState = { wf: -1, node: -1 };
 let analyzeState = { wf: -1, nodes: [], method: "" };
@@ -550,6 +570,83 @@ function populateWorkflowSelect(selectedName = "") {
   ).join("");
 }
 
+function formatSize(size) {
+  const n = Number(size || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function populateTemplateSelect(currentPath = "") {
+  const sel = $("wfTemplate");
+  const known = new Set(state.templates.map((t) => t.path));
+  const options = ['<option value="">不使用模板</option>'];
+  if (currentPath && !known.has(currentPath)) {
+    options.push(`<option value="${esc(currentPath)}">${esc(currentPath)}</option>`);
+  }
+  for (const t of state.templates) {
+    options.push(`<option value="${esc(t.path)}">${esc(t.path)} · ${formatSize(t.size)}</option>`);
+  }
+  sel.innerHTML = options.join("");
+  updateTemplateHint();
+}
+
+function updateTemplateHint() {
+  const path = $("wfTemplate").value;
+  const t = state.templates.find((item) => item.path === path);
+  const hint = $("wfTemplateHint");
+  if (!path) hint.textContent = "未选择模板；模板存放在插件 prompt/ 目录。";
+  else if (t) hint.textContent = `${t.name} · ${formatSize(t.size)}`;
+  else hint.textContent = `自定义路径：${path}`;
+}
+
+async function loadTemplates() {
+  try {
+    const res = await bridge.apiGet("page/prompt-templates");
+    if (res && res.success !== false && res.data) {
+      state.templates = Array.isArray(res.data.templates) ? clone(res.data.templates) : [];
+    }
+  } catch (err) {
+    state.templates = [];
+    toast(`读取模板列表失败：${err?.message || err}`, "warn", 4200);
+  }
+}
+
+async function uploadTemplate(file) {
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    toast("模板文件不能超过 2MB", "err");
+    return;
+  }
+  try {
+    const res = await bridge.upload("page/prompt-templates", file);
+    if (!res || res.success === false) throw new Error(res?.message || "上传失败");
+    await loadTemplates();
+    const path = res.data?.path || "";
+    populateTemplateSelect(path || `prompt/${file.name}`);
+    toast(res.message || "模板已上传", "ok");
+  } catch (err) {
+    toast(`上传失败：${err?.message || err}`, "err", 5200);
+  }
+}
+
+async function previewSelectedTemplate() {
+  const path = $("wfTemplate").value;
+  if (!path) {
+    toast("请先选择一个模板", "warn");
+    return;
+  }
+  try {
+    const res = await bridge.apiGet("page/prompt-template", { name: path });
+    if (!res || res.success === false) throw new Error(res?.message || "读取模板失败");
+    $("templatePreviewTitle").textContent = path;
+    $("templatePreviewContent").value = res.data?.content || "";
+    $("templatePreviewDialog").showModal();
+  } catch (err) {
+    toast(`预览失败：${err?.message || err}`, "err", 5200);
+  }
+}
+
 function openWorkflowDialog(index) {
   workflowDialogIndex = index;
   const wf = index >= 0 ? state.workflows[index] : null;
@@ -559,7 +656,7 @@ function openWorkflowDialog(index) {
   $("wfInstance").value = wf?.instance_type || "Standard";
   $("wfRegion").value = wf?.region || "overseas";
   $("wfEnhance").checked = Boolean(wf?.llm_enhance);
-  $("wfTemplate").value = wf?.llm_template_path || "";
+  populateTemplateSelect(wf?.llm_template_path || "");
   $("workflowDialog").showModal();
 }
 
@@ -858,6 +955,13 @@ $("refreshBtn").addEventListener("click", async () => {
   catch (err) { toast(String(err?.message || err), "err"); }
 });
 $("saveBtn").addEventListener("click", saveConfig);
+$("wfUploadBtn").addEventListener("click", () => $("wfTemplateFile").click());
+$("wfTemplateFile").addEventListener("change", (event) => {
+  uploadTemplate(event.target.files?.[0] || null);
+  event.target.value = "";
+});
+$("wfPreviewBtn").addEventListener("click", previewSelectedTemplate);
+$("wfTemplate").addEventListener("change", updateTemplateHint);
 $("searchInput").addEventListener("input", (event) => { state.search = event.target.value; render(); });
 $("regionFilter").addEventListener("change", (event) => { state.region = event.target.value; render(); });
 $("nodeType").addEventListener("change", updateNodeTypeHint);
@@ -881,7 +985,7 @@ async function init() {
     if (!bridge || typeof bridge.ready !== "function") throw new Error("未检测到 AstrBot Plugin Page Bridge，请从 AstrBot WebUI 的插件页面入口打开本页面。");
     const context = await bridge.ready();
     $("pluginMeta").textContent = context?.displayName || context?.pluginName || "runninghub_workflow_adapter";
-    await loadConfig();
+    await Promise.all([loadConfig(), loadTemplates()]);
     toast("已连接插件并读取配置", "ok", 2200);
   } catch (err) {
     state.loading = false;

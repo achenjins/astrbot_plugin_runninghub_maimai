@@ -475,7 +475,7 @@ def test_page_entry_exists() -> None:
     assert "mask-image" in style.read_text(encoding="utf-8")
 
     icon_dir = PLUGIN_DIR / "pages" / "workflow-editor" / "assets" / "icons"
-    assert len(list(icon_dir.glob("*.svg"))) >= 18
+    assert len(list(icon_dir.glob("*.svg"))) >= 21
 
 
 def test_page_config_payload_exposes_workflow_nodes(
@@ -588,3 +588,28 @@ def test_page_save_persists_workflow_nodes(
     saved = star._astrbot_config["workflow_nodes"]
     assert [n["node_id"] for n in saved] == ["10", "11"]
     assert star._workflow_names() == ["页面保存"]
+
+def test_preset_prompt_template_ships_with_plugin() -> None:
+    template = PLUGIN_DIR / "prompt" / "anima3_prompt_template.txt"
+    assert template.is_file()
+    content = template.read_text(encoding="utf-8")
+    assert content.startswith("# ANIMA3 提示词生成模板")
+
+
+def test_prompt_template_path_validation(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    target = star._safe_prompt_template("anima3_prompt_template.txt")
+    assert target is not None
+    assert target.name == "anima3_prompt_template.txt"
+    assert star._safe_prompt_template("../metadata.yaml") is None
+    assert star._safe_prompt_template("bad.exe") is None
+    assert star._safe_prompt_template("") is None
+
+
+def test_prompt_template_list_contains_preset(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    templates = star._list_prompt_templates()
+    paths = [item["path"] for item in templates]
+    assert "prompt/anima3_prompt_template.txt" in paths
