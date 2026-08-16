@@ -337,10 +337,37 @@ class RunningHubGenericPlugin(Star):
         except Exception as exc:
             self.logger.warning("[配置] 旧版 config.toml 迁移失败，请手动在 WebUI 配置: %s", exc)
 
+    def _migrate_embedded_nodes_to_workflow_nodes(self) -> None:
+        """把旧版嵌入在 workflow 项里的输入节点迁移为 workflow_nodes 配置。"""
+        if self._astrbot_config is None:
+            return
+        workflows = self._astrbot_config.get("workflows")
+        if not isinstance(workflows, list):
+            return
+        has_embedded = any(
+            isinstance(wf, dict)
+            and (
+                "input_nodes" in wf
+                or "input_nodes_extra" in wf
+                or any(f"input_node_{index}" in wf for index in range(1, 9))
+            )
+            for wf in workflows
+        )
+        if not has_embedded or self._astrbot_config.get("workflow_nodes"):
+            return
+        migrated = dump_config_dict(self.config)
+        self._astrbot_config.save_config(migrated)
+        self._apply_config_dict(migrated)
+        self.logger.info(
+            "[配置] 已将旧版嵌入输入节点迁移为 workflow_nodes（%d 条）",
+            len(migrated.get("workflow_nodes") or []),
+        )
+
     async def initialize(self) -> None:
         """插件激活时调用（对应 maibot 的 on_load）。"""
         self._import_legacy_config_if_needed()
         await self._reload_from_context_config()
+        self._migrate_embedded_nodes_to_workflow_nodes()
         cfg = self.config
         self._semaphore = asyncio.Semaphore(max(1, cfg.generation.max_concurrent))
         self._rebuild_client()
@@ -2356,7 +2383,12 @@ class RunningHubGenericPlugin(Star):
             self._refresh_workflows()
             self._refresh_llm_tool_description()
             self._validate_workflows()
-            self.logger.info("[识别] 已写入插件配置（%d 个节点）并热重载", len(nodes))
+            self.logger.info(
+                "[识别] 已写入插件配置：workflows=%d, workflow_nodes=%d（本次 %d 个节点）",
+                len(new_raw.get("workflows") or []),
+                len(new_raw.get("workflow_nodes") or []),
+                len(nodes),
+            )
 
 
     async def _detect_input_nodes_with_llm(
