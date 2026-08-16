@@ -459,3 +459,124 @@ def test_namespaced_import_ignores_stale_top_level_lib(tmp_path: Path) -> None:
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert lines[-2].startswith(str(lib_dir))
     assert lines[-1] == "True"
+
+
+
+def test_page_entry_exists() -> None:
+    page = PLUGIN_DIR / "pages" / "workflow-editor" / "index.html"
+    assert page.is_file()
+    text = page.read_text(encoding="utf-8")
+    assert "AstrBotPluginPage" in text
+    assert "page/config" in text
+
+
+def test_page_config_payload_exposes_workflow_nodes(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    raw = {
+        "workflows": [
+            {
+                "__template_key": "workflow",
+                "name": "可视化",
+                "workflow_id": "42",
+                "instance_type": "Standard",
+                "region": "overseas",
+                "llm_enhance": False,
+                "llm_template_path": "",
+            }
+        ],
+        "workflow_nodes": [
+            {
+                "__template_key": "input_node",
+                "workflow_name": "可视化",
+                "node_id": "353",
+                "field_name": "prompt",
+                "field_value": "",
+                "value_type": "prompt",
+                "label": "提示词",
+            }
+        ],
+    }
+    star._apply_config_dict(raw)
+    star._refresh_workflows()
+    payload = star._page_config_payload()
+    assert payload["workflows"][0]["name"] == "可视化"
+    assert payload["workflows"][0]["nodes"][0]["node_id"] == "353"
+    assert payload["workflows"][0]["nodes"][0]["effective_type"] == "prompt"
+
+
+def test_page_workflow_payload_validation(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    items, error = star._workflows_from_page_payload(
+        [
+            {
+                "name": "可视化",
+                "workflow_id": "42",
+                "instance_type": "Standard",
+                "region": "overseas",
+                "llm_enhance": False,
+                "llm_template_path": "",
+                "nodes": [
+                    {
+                        "node_id": "353",
+                        "field_name": "prompt",
+                        "field_value": "",
+                        "value_type": "prompt",
+                        "label": "提示词",
+                    }
+                ],
+            }
+        ]
+    )
+    assert error == ""
+    assert len(items) == 1
+    assert items[0].input_nodes[0].node_id == "353"
+
+    _, duplicate_name = star._workflows_from_page_payload(
+        [
+            {"name": "同名", "workflow_id": "1", "nodes": []},
+            {"name": "同名", "workflow_id": "2", "nodes": []},
+        ]
+    )
+    assert "重复" in duplicate_name
+
+    _, duplicate_prompt = star._workflows_from_page_payload(
+        [
+            {
+                "name": "双提示词",
+                "workflow_id": "1",
+                "nodes": [
+                    {"node_id": "1", "field_name": "a", "value_type": "prompt"},
+                    {"node_id": "2", "field_name": "b", "value_type": "prompt"},
+                ],
+            }
+        ]
+    )
+    assert "主提示词" in duplicate_prompt
+
+
+def test_page_save_persists_workflow_nodes(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    items, error = star._workflows_from_page_payload(
+        [
+            {
+                "name": "页面保存",
+                "workflow_id": "77",
+                "nodes": [
+                    {"node_id": "10", "field_name": "text", "value_type": "prompt"},
+                    {"node_id": "11", "field_name": "image", "value_type": "image"},
+                ],
+            }
+        ]
+    )
+    assert error == ""
+
+    async def _run() -> None:
+        await star._persist_workflow_items(items)
+
+    asyncio.run(_run())
+    saved = star._astrbot_config["workflow_nodes"]
+    assert [n["node_id"] for n in saved] == ["10", "11"]
+    assert star._workflow_names() == ["页面保存"]

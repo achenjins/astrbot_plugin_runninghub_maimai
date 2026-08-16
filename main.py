@@ -413,6 +413,24 @@ class RunningHubGenericPlugin(Star):
             ["POST"],
             "运行配置好的 RunningHub 工作流（供其他插件 / WebUI 调用）",
         )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/config",
+            self.handle_page_get_config,
+            ["GET"],
+            "可视化页面：读取工作流与输入节点",
+        )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/config",
+            self.handle_page_save_config,
+            ["POST"],
+            "可视化页面：保存工作流与输入节点",
+        )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/analyze",
+            self.handle_page_analyze_workflow,
+            ["POST"],
+            "可视化页面：拉取并识别工作流输入节点",
+        )
 
         self.logger.info(
             "麦麦画师插件已加载：base_url=%s 工作流数量=%d",
@@ -2365,6 +2383,24 @@ class RunningHubGenericPlugin(Star):
                 return llm_nodes, "LLM"
         return detect_key_nodes(workflow_json), "简化"
 
+    async def _persist_workflow_items(
+        self, items: list[WorkflowItemSection]
+    ) -> dict[str, Any]:
+        """把工作流列表写入 AstrBot 配置并热更新当前实例（识别 / 可视化页面共用）。"""
+        async with self._config_write_lock:
+            temp = self.config.model_copy(deep=True)
+            temp.workflows.items = [
+                WorkflowItemSection.model_validate(item) for item in items
+            ]
+            new_raw = dump_config_dict(temp)
+            if self._astrbot_config is not None:
+                await asyncio.to_thread(self._astrbot_config.save_config, new_raw)
+            self._apply_config_dict(new_raw)
+            self._refresh_workflows()
+            self._refresh_llm_tool_description()
+            self._validate_workflows()
+            return new_raw
+
     async def _append_workflow_to_config(
         self,
         *,
@@ -2374,48 +2410,39 @@ class RunningHubGenericPlugin(Star):
         region: str = "overseas",
     ) -> None:
         """将识别出的工作流写入 AstrBot 插件配置并热更新当前实例。"""
-        async with self._config_write_lock:
-            workflow_dict: dict[str, Any] = {
-                "name": workflow_name,
-                "workflow_id": workflow_id,
-                "instance_type": "Standard",
-                "region": region,
-                "llm_enhance": False,
-                "llm_template_path": "",
-                "input_nodes": [
-                    {
-                        "node_id": str(node.get("node_id") or ""),
-                        "field_name": str(node.get("field_name") or ""),
-                        "field_value": str(node.get("field_value") or ""),
-                        "value_type": str(node.get("value_type") or ""),
-                        "label": str(node.get("label") or node.get("hint") or ""),
-                    }
-                    for node in nodes
-                ],
-            }
-            WorkflowItemSection.model_validate(workflow_dict)
+        workflow_dict: dict[str, Any] = {
+            "name": workflow_name,
+            "workflow_id": workflow_id,
+            "instance_type": "Standard",
+            "region": region,
+            "llm_enhance": False,
+            "llm_template_path": "",
+            "input_nodes": [
+                {
+                    "node_id": str(node.get("node_id") or ""),
+                    "field_name": str(node.get("field_name") or ""),
+                    "field_value": str(node.get("field_value") or ""),
+                    "value_type": str(node.get("value_type") or ""),
+                    "label": str(node.get("label") or node.get("hint") or ""),
+                }
+                for node in nodes
+            ],
+        }
+        WorkflowItemSection.model_validate(workflow_dict)
 
-            merged = [
-                workflow.model_dump(mode="python")
-                for workflow in self.config.workflows.items
-            ]
-            merged.append(workflow_dict)
-            merged_models = [WorkflowItemSection.model_validate(item) for item in merged]
-            temp = self.config.model_copy(deep=True)
-            temp.workflows.items = merged_models
-            new_raw = dump_config_dict(temp)
-            if self._astrbot_config is not None:
-                await asyncio.to_thread(self._astrbot_config.save_config, new_raw)
-            self._apply_config_dict(new_raw)
-            self._refresh_workflows()
-            self._refresh_llm_tool_description()
-            self._validate_workflows()
-            self.logger.info(
-                "[识别] 已写入插件配置：workflows=%d, workflow_nodes=%d（本次 %d 个节点）",
-                len(new_raw.get("workflows") or []),
-                len(new_raw.get("workflow_nodes") or []),
-                len(nodes),
-            )
+        merged = [
+            workflow.model_dump(mode="python")
+            for workflow in self.config.workflows.items
+        ]
+        merged.append(workflow_dict)
+        merged_models = [WorkflowItemSection.model_validate(item) for item in merged]
+        new_raw = await self._persist_workflow_items(merged_models)
+        self.logger.info(
+            "[识别] 已写入插件配置：workflows=%d, workflow_nodes=%d（本次 %d 个节点）",
+            len(new_raw.get("workflows") or []),
+            len(new_raw.get("workflow_nodes") or []),
+            len(nodes),
+        )
 
 
     async def _detect_input_nodes_with_llm(
@@ -2562,6 +2589,225 @@ class RunningHubGenericPlugin(Star):
             "任务已提交并开始运行，task_id=" + str(result.get("task_id") or "") + "。"
             "生成结果会异步自动发送到会话，你无需等待或轮询，请直接结束本轮思考，不要调用 wait。"
         )
+
+    @staticmethod
+    def _web_jsonify(payload: Any):
+        """返回 JSON 响应，兼容 Quart（AstrBot 4.x）与 Flask。"""
+        try:
+            from quart import jsonify
+        except ImportError:
+            from flask import jsonify
+        return jsonify(payload)
+
+    async def _web_request_json(self) -> dict[str, Any]:
+        """读取 Web API 的 JSON body，兼容 Quart 与 Flask。"""
+        try:
+            from quart import request as web_request
+            return await web_request.get_json(silent=True) or {}
+        except ImportError:
+            from flask import request as web_request
+            return web_request.get_json(silent=True) or {}
+
+    def _page_config_payload(self) -> dict[str, Any]:
+        """生成可视化页面使用的配置快照（只暴露工作流与节点）。"""
+        workflows: list[dict[str, Any]] = []
+        for workflow in self.config.workflows.items:
+            nodes: list[dict[str, Any]] = []
+            for node in workflow.input_nodes:
+                if not str(node.node_id or "").strip():
+                    continue
+                nodes.append(
+                    {
+                        "node_id": str(node.node_id or ""),
+                        "field_name": str(node.field_name or "prompt"),
+                        "field_value": str(node.field_value or ""),
+                        "value_type": str(node.value_type or ""),
+                        "effective_type": self._resolve_value_type(node),
+                        "label": str(node.label or ""),
+                    }
+                )
+            workflows.append(
+                {
+                    "name": str(workflow.name or ""),
+                    "workflow_id": str(workflow.workflow_id or ""),
+                    "instance_type": str(workflow.instance_type or "Standard"),
+                    "region": str(workflow.region or "overseas"),
+                    "llm_enhance": bool(workflow.llm_enhance),
+                    "llm_template_path": str(workflow.llm_template_path or ""),
+                    "nodes": nodes,
+                }
+            )
+        return {
+            "workflows": workflows,
+            "use_llm": bool(self.config.feature.use_llm),
+            "max_nodes": _MAX_NODES,
+            "max_workflows": 20,
+            "overseas_ready": bool(self.config.server.api_key),
+            "domestic_ready": bool(self.config.server.api_key_cn),
+        }
+
+    def _workflows_from_page_payload(
+        self, workflows_raw: Any
+    ) -> tuple[list[WorkflowItemSection], str]:
+        """把页面提交的工作流列表校验成强类型模型。"""
+        if not isinstance(workflows_raw, list):
+            return [], "workflows 必须是数组"
+        if len(workflows_raw) > 20:
+            return [], "工作流数量不能超过 20 个"
+        allowed_types = {"", "default", "text", "image", "audio", "video", "prompt"}
+        items: list[WorkflowItemSection] = []
+        names: set[str] = set()
+        for index, raw in enumerate(workflows_raw, start=1):
+            if not isinstance(raw, dict):
+                return [], f"第 {index} 个工作流格式不正确"
+            name = str(raw.get("name") or "").strip()
+            if not name:
+                return [], f"第 {index} 个工作流缺少名称"
+            if name in names:
+                return [], f"工作流名称「{name}」重复"
+            names.add(name)
+            workflow_id = str(raw.get("workflow_id") or "").strip()
+            if not workflow_id:
+                return [], f"工作流「{name}」缺少工作流 ID"
+            instance_type = str(raw.get("instance_type") or "Standard").strip()
+            if instance_type not in ("Standard", "Plus", "Ultra"):
+                instance_type = "Standard"
+            region = str(raw.get("region") or "overseas").strip()
+            if region not in ("overseas", "domestic"):
+                region = "overseas"
+            llm_enhance = raw.get("llm_enhance", False)
+            if not isinstance(llm_enhance, bool):
+                llm_enhance = str(llm_enhance).strip().lower() in {"1", "true", "yes", "on"}
+            llm_template_path = str(raw.get("llm_template_path") or "").strip()
+            nodes_raw = raw.get("nodes") or []
+            if not isinstance(nodes_raw, list):
+                return [], f"工作流「{name}」的 nodes 必须是数组"
+            if len(nodes_raw) > _MAX_NODES:
+                return [], f"工作流「{name}」输入节点超过 {_MAX_NODES} 个上限"
+            nodes: list[dict[str, Any]] = []
+            seen_fields: set[tuple[str, str]] = set()
+            prompt_count = 0
+            for node_index, node_raw in enumerate(nodes_raw, start=1):
+                if not isinstance(node_raw, dict):
+                    return [], f"工作流「{name}」第 {node_index} 个节点格式不正确"
+                node_id = str(node_raw.get("node_id") or "").strip()
+                if not node_id:
+                    return [], f"工作流「{name}」第 {node_index} 个节点缺少 node_id"
+                field_name = str(node_raw.get("field_name") or "prompt").strip() or "prompt"
+                field_value = str(node_raw.get("field_value") or "")
+                value_type = str(node_raw.get("value_type") or "").strip().lower()
+                if value_type == "auto":
+                    value_type = ""
+                if value_type not in allowed_types:
+                    return [], f"工作流「{name}」节点 {node_id}/{field_name} 类型不合法"
+                label = str(node_raw.get("label") or "").strip()
+                key = (node_id, field_name)
+                if key in seen_fields:
+                    return [], f"工作流「{name}」存在重复节点 {node_id}/{field_name}"
+                seen_fields.add(key)
+                if value_type == "prompt":
+                    prompt_count += 1
+                    if prompt_count > 1:
+                        return [], f"工作流「{name}」最多只能有 1 个主提示词节点"
+                nodes.append(
+                    {
+                        "node_id": node_id,
+                        "field_name": field_name,
+                        "field_value": field_value,
+                        "value_type": value_type,
+                        "label": label,
+                    }
+                )
+            items.append(
+                WorkflowItemSection.model_validate(
+                    {
+                        "name": name,
+                        "workflow_id": workflow_id,
+                        "instance_type": instance_type,
+                        "region": region,
+                        "llm_enhance": llm_enhance,
+                        "llm_template_path": llm_template_path,
+                        "input_nodes": nodes,
+                    }
+                )
+            )
+        return items, ""
+
+    async def handle_page_get_config(self):
+        """可视化页面 API：读取工作流与输入节点。"""
+        return self._web_jsonify({"success": True, "data": self._page_config_payload()})
+
+    async def handle_page_save_config(self):
+        """可视化页面 API：整体保存工作流与输入节点。"""
+        try:
+            payload = await self._web_request_json()
+        except Exception as exc:  # pragma: no cover
+            self.logger.error("读取页面保存请求失败: %s", exc)
+            return self._web_jsonify({"success": False, "message": f"读取请求失败: {exc}"})
+        if "workflows" not in payload:
+            return self._web_jsonify({"success": False, "message": "缺少 workflows 字段"})
+        items, error = self._workflows_from_page_payload(payload.get("workflows"))
+        if error:
+            return self._web_jsonify({"success": False, "message": error})
+        try:
+            new_raw = await self._persist_workflow_items(items)
+        except Exception as exc:  # pragma: no cover
+            self.logger.error("[页面] 保存配置失败: %s", exc, exc_info=True)
+            return self._web_jsonify({"success": False, "message": f"保存失败: {exc}"})
+        self.logger.info(
+            "[页面] 已保存工作流配置：workflows=%d, workflow_nodes=%d",
+            len(new_raw.get("workflows") or []),
+            len(new_raw.get("workflow_nodes") or []),
+        )
+        return self._web_jsonify(
+            {
+                "success": True,
+                "message": "配置已保存并热更新",
+                "workflows": len(new_raw.get("workflows") or []),
+                "workflow_nodes": len(new_raw.get("workflow_nodes") or []),
+            }
+        )
+
+    async def handle_page_analyze_workflow(self):
+        """可视化页面 API：拉取并识别工作流节点（不写入配置）。"""
+        try:
+            payload = await self._web_request_json()
+        except Exception as exc:  # pragma: no cover
+            self.logger.error("读取页面识别请求失败: %s", exc)
+            return self._web_jsonify({"success": False, "message": f"读取请求失败: {exc}"})
+        workflow_id = str(payload.get("workflow_id") or "").strip()
+        region = str(payload.get("region") or "overseas").strip()
+        if region not in ("overseas", "domestic"):
+            region = "overseas"
+        detailed = bool(payload.get("detailed", False))
+        if not workflow_id:
+            return self._web_jsonify({"success": False, "message": "workflow_id 不能为空"})
+        key_attr = "api_key_cn" if region == "domestic" else "api_key"
+        if not getattr(self.config.server, key_attr):
+            label = "国内" if region == "domestic" else "国外"
+            return self._web_jsonify({"success": False, "message": f"{label} API Key 未填写"})
+        client = self._get_client(region)
+        if client is None:
+            self._rebuild_client()
+            client = self._get_client(region)
+        if client is None:
+            return self._web_jsonify({"success": False, "message": "RunningHub 客户端初始化失败"})
+        try:
+            workflow_json = await client.get_workflow_json(workflow_id)
+        except Exception as exc:  # pragma: no cover
+            self.logger.error("[页面] 拉取工作流失败: %s", exc)
+            return self._web_jsonify({"success": False, "message": f"拉取工作流失败: {exc}"})
+        try:
+            if detailed:
+                detected, method = await self._detect_full(workflow_json, stream_id="")
+            else:
+                detected, method = await self._detect_key_full(workflow_json, stream_id="")
+        except Exception as exc:  # pragma: no cover
+            self.logger.error("[页面] 识别节点失败: %s", exc, exc_info=True)
+            return self._web_jsonify({"success": False, "message": f"识别失败: {exc}"})
+        if not detected:
+            return self._web_jsonify({"success": False, "message": "未识别出输入节点，请手动添加"})
+        return self._web_jsonify({"success": True, "method": method, "nodes": detected})
 
     async def handle_run_workflow_api(self):
         """Web API：运行配置好的 RunningHub 工作流（供其他插件 / WebUI 调用）。"""
