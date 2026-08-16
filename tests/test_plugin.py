@@ -119,7 +119,9 @@ def test_append_workflow_persists_to_astrbot_config(
     assert star._workflow_names() == ["测试"]
     saved = star._astrbot_config["workflows"][0]
     assert saved["name"] == "测试"
-    assert json.loads(saved["input_nodes"])[0]["node_id"] == "353"
+    saved_nodes = star._astrbot_config["workflow_nodes"]
+    assert saved_nodes[0]["workflow_name"] == "测试"
+    assert saved_nodes[0]["node_id"] == "353"
 
 
 def test_config_workflow_json_nodes_roundtrip(star: plugin_main.RunningHubGenericPlugin) -> None:
@@ -137,11 +139,13 @@ def test_config_workflow_json_nodes_roundtrip(star: plugin_main.RunningHubGeneri
                 "instance_type": "Standard",
                 "region": "overseas",
                 "llm_enhance": False,
-                "llm_template_path": "",
-                "input_nodes": json.dumps(
-                    [{"node_id": "353", "field_name": "prompt", "value_type": "prompt"}],
-                    ensure_ascii=False,
-                ),
+                "llm_template_path": "","input_node_1": {
+                      "node_id": "353",
+                      "field_name": "prompt",
+                      "field_value": "",
+                      "value_type": "prompt",
+                      "label": "提示词",
+                  },
             }
         ],
     }
@@ -150,7 +154,8 @@ def test_config_workflow_json_nodes_roundtrip(star: plugin_main.RunningHubGeneri
     assert star._workflow_names() == ["动漫生图"]
     dumped = star._dump_config_dict()
     assert dumped["workflows"][0]["__template_key"] == "workflow"
-    assert json.loads(dumped["workflows"][0]["input_nodes"])[0]["node_id"] == "353"
+    assert dumped["workflow_nodes"][0]["workflow_name"] == "动漫生图"
+    assert dumped["workflow_nodes"][0]["node_id"] == "353"
 
 
 def test_detect_key_nodes(star: plugin_main.RunningHubGenericPlugin) -> None:
@@ -318,7 +323,10 @@ label = "提示词"
     assert workflow["__template_key"] == "workflow"
     assert workflow["instance_type"] == "Plus"
     assert workflow["region"] == "domestic"
-    assert json.loads(workflow["input_nodes"])[0]["node_id"] == "353"
+    node = converted["workflow_nodes"][0]
+    assert node["__template_key"] == "input_node"
+    assert node["workflow_name"] == "动漫生图"
+    assert node["node_id"] == "353"
 
 
 def test_legacy_import_on_first_deploy(
@@ -349,3 +357,51 @@ input_nodes = []
 
     assert star.config.server.api_key == "legacy-key"
     assert star._workflow_names() == ["旧工作流"]
+
+
+def test_legacy_json_input_nodes_still_parses(star: plugin_main.RunningHubGenericPlugin) -> None:
+    raw = {
+        "workflows": [
+            {
+                "__template_key": "workflow",
+                "name": "旧版",
+                "workflow_id": "9",
+                "input_nodes": json.dumps(
+                    [{"node_id": "353", "field_name": "prompt", "value_type": "prompt"}],
+                    ensure_ascii=False,
+                ),
+            }
+        ]
+    }
+    star._apply_config_dict(raw)
+    star._refresh_workflows()
+    assert star._workflow_names() == ["旧版"]
+    assert star.config.workflows.items[0].input_nodes[0].node_id == "353"
+
+
+def test_embedded_node_slots_survive_astrbot_default_workflow_nodes(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    # AstrBotConfig 会给新 schema 自动补 workflow_nodes=[]，
+    # 但旧配置仍把节点嵌在 workflow 项里，必须优先使用旧嵌入节点。
+    raw = {
+        "workflows": [
+            {
+                "__template_key": "workflow",
+                "name": "旧配置",
+                "workflow_id": "7",
+                "input_node_1": {
+                    "node_id": "353",
+                    "field_name": "prompt",
+                    "field_value": "",
+                    "value_type": "prompt",
+                    "label": "提示词",
+                },
+            }
+        ],
+        "workflow_nodes": [],
+    }
+    star._apply_config_dict(raw)
+    star._refresh_workflows()
+    assert star._workflow_names() == ["旧配置"]
+    assert star.config.workflows.items[0].input_nodes[0].node_id == "353"

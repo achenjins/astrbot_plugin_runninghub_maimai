@@ -149,7 +149,19 @@ pip install -r requirements.txt
 | `instance_type` | Standard / Plus / Ultra |
 | `region` | overseas=国外，domestic=国内 |
 | `llm_enhance` / `llm_template_path` | 提示词扩写开关与模板路径 |
-| `input_nodes` | 输入节点 JSON，推荐用 /识别* 命令自动生成 |
+
+### 输入节点列表
+
+输入节点是独立的「添加条目」列表，想加几个就加几个：
+
+| 配置项 | 说明 |
+| --- | --- |
+| `workflow_name` | 所属工作流，需与上面工作流的 `name` 完全一致 |
+| `node_id` | RunningHub 节点 ID |
+| `field_name` | 要控制的字段名，如 prompt / image / audio / width |
+| `field_value` | 默认值，留空运行时询问 |
+| `value_type` | 节点类型：prompt / text / default / image / audio / video |
+| `label` | 等待上传时显示的中文说明 |
 
 ---
 

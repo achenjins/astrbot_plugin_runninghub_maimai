@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 
+
 _NODE_KEYS = ("node_id", "field_name", "field_value", "value_type", "label")
 _MAIBOT_MODEL_SLOTS = {"utils", "replyer", "planner"}
 
@@ -65,9 +66,10 @@ def _normalise_nodes(raw_nodes: Any) -> list[dict[str, str]]:
     return nodes
 
 
-def _normalise_workflows(raw_workflows: Any) -> list[dict[str, Any]]:
-    """把三类旧工作流结构统一成 AstrBot template_list 条目。"""
+def _normalise_workflows(raw_workflows: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """把三类旧工作流结构统一成 AstrBot 配置的 workflows / workflow_nodes。"""
     workflows: list[dict[str, Any]] = []
+    workflow_nodes: list[dict[str, Any]] = []
     if isinstance(raw_workflows, dict):
         items = raw_workflows.get("items")
         if not isinstance(items, list):
@@ -76,7 +78,7 @@ def _normalise_workflows(raw_workflows: Any) -> list[dict[str, Any]]:
     elif isinstance(raw_workflows, list):
         source = raw_workflows
     else:
-        return workflows
+        return workflows, workflow_nodes
 
     for raw in source:
         if not isinstance(raw, dict):
@@ -87,23 +89,30 @@ def _normalise_workflows(raw_workflows: Any) -> list[dict[str, Any]]:
         region = _string(raw.get("region"), "overseas")
         if region not in ("overseas", "domestic"):
             region = "overseas"
-        nodes = _normalise_nodes(raw.get("input_nodes"))
+        name = _string(raw.get("name"))
         workflows.append(
             {
                 "__template_key": "workflow",
-                "name": _string(raw.get("name")),
+                "name": name,
                 "workflow_id": _string(raw.get("workflow_id")),
                 "instance_type": instance_type,
                 "region": region,
                 "llm_enhance": _bool(raw.get("llm_enhance"), False),
                 "llm_template_path": _string(raw.get("llm_template_path")),
-                "input_nodes": json.dumps(nodes, ensure_ascii=False),
             }
         )
-    return workflows
+        for node in _normalise_nodes(raw.get("input_nodes")):
+            workflow_nodes.append(
+                {
+                    "__template_key": "input_node",
+                    "workflow_name": name,
+                    **node,
+                }
+            )
+    return workflows, workflow_nodes
 
 
-def _parse_nested_workflows_toml(text: str) -> list[dict[str, Any]]:
+def _parse_nested_workflows_toml(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """解析 workflows_toml 字符串里的旧表结构。"""
     data = tomllib.loads(text)
     raw = data.get("workflows")
@@ -139,18 +148,19 @@ def parse_legacy_toml(path: str | Path) -> dict[str, Any]:
 
     workflows_raw = data.get("workflows")
     workflows: list[dict[str, Any]] = []
+    workflow_nodes: list[dict[str, Any]] = []
     if isinstance(workflows_raw, dict):
         embedded = workflows_raw.get("workflows_toml")
         if isinstance(embedded, str) and embedded.strip():
-            workflows = _parse_nested_workflows_toml(embedded)
+            workflows, workflow_nodes = _parse_nested_workflows_toml(embedded)
         else:
-            workflows = _normalise_workflows(workflows_raw)
+            workflows, workflow_nodes = _normalise_workflows(workflows_raw)
     else:
-        workflows = _normalise_workflows(workflows_raw)
+        workflows, workflow_nodes = _normalise_workflows(workflows_raw)
 
     legacy_text = _string(data.get("workflows_toml"))
     if not workflows and legacy_text.strip():
-        workflows = _parse_nested_workflows_toml(legacy_text)
+        workflows, workflow_nodes = _parse_nested_workflows_toml(legacy_text)
 
     return {
         "config_version": "2.0.0",
@@ -181,6 +191,7 @@ def parse_legacy_toml(path: str | Path) -> dict[str, Any]:
             "admin_users": [str(u) for u in (access.get("admin_users") or [])],
         },
         "workflows": workflows,
+        "workflow_nodes": workflow_nodes,
     }
 
 

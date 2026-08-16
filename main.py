@@ -2346,10 +2346,10 @@ class RunningHubGenericPlugin(Star):
                 for workflow in self.config.workflows.items
             ]
             merged.append(workflow_dict)
-            new_raw = dump_config_dict(self.config)
-            new_raw["workflows"] = dump_workflow_items(
-                [WorkflowItemSection.model_validate(item) for item in merged]
-            )
+            merged_models = [WorkflowItemSection.model_validate(item) for item in merged]
+            temp = self.config.model_copy(deep=True)
+            temp.workflows.items = merged_models
+            new_raw = dump_config_dict(temp)
             if self._astrbot_config is not None:
                 await asyncio.to_thread(self._astrbot_config.save_config, new_raw)
             self._apply_config_dict(new_raw)

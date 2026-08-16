@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+NODE_FORM_SLOTS = 8
+
 class PluginMetaSection(BaseModel):
     """插件配置版本信息（用于未来配置迁移，请勿删除）。"""
 
@@ -299,79 +301,163 @@ class GenericConfig(BaseModel):
         return value
 
 
-def build_workflow_items(raw_workflows: Any) -> list[dict[str, Any]]:
-    """把 AstrBot 配置里的 workflows(template_list) 归一化为 pydantic 可校验的 dict 列表。
+def _node_from_raw(raw: dict[str, Any]) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    node_id = str(raw.get("node_id") or "").strip()
+    if not node_id:
+        return None
+    return {
+        "node_id": node_id,
+        "field_name": str(raw.get("field_name") or "prompt").strip() or "prompt",
+        "field_value": str(raw.get("field_value") or ""),
+        "value_type": str(raw.get("value_type") or "").strip().lower(),
+        "label": str(raw.get("label") or "").strip(),
+    }
 
-    WebUI 的 input_nodes 字段使用 JSON 文本编辑器存储；这里兼容 JSON 字符串与
-    普通 list 两种形态，以及从 maibot 旧配置直接粘贴过来的结构。
+
+def _parse_json_nodes(nodes_raw: Any) -> list[dict[str, Any]]:
+    """兼容旧版 input_nodes 的 JSON 字符串 / list 两种形态。"""
+    nodes: list[dict[str, Any]] = []
+    if isinstance(nodes_raw, str):
+        stripped = nodes_raw.strip()
+        if stripped:
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = []
+            if isinstance(parsed, list):
+                nodes = [n for n in parsed if isinstance(n, dict)]
+    elif isinstance(nodes_raw, list):
+        nodes = [n for n in nodes_raw if isinstance(n, dict)]
+    return [n for n in (_node_from_raw(n) for n in nodes) if n is not None]
+
+
+def _legacy_nodes_from_entry(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """解析旧版配置中嵌入在工作流项里的输入节点。"""
+    if "input_nodes" in entry:
+        nodes = _parse_json_nodes(entry.get("input_nodes"))
+    else:
+        nodes = []
+        for index in range(1, NODE_FORM_SLOTS + 1):
+            slot = entry.get(f"input_node_{index}")
+            node = _node_from_raw(slot) if isinstance(slot, dict) else None
+            if node is not None:
+                nodes.append(node)
+        nodes.extend(_parse_json_nodes(entry.get("input_nodes_extra")))
+    return nodes
+
+
+def _workflow_dict_from_raw(entry: dict[str, Any]) -> dict[str, Any] | None:
+    instance_type = str(entry.get("instance_type") or "Standard").strip()
+    if instance_type not in ("Standard", "Plus", "Ultra"):
+        instance_type = "Standard"
+    region = str(entry.get("region") or "overseas").strip()
+    if region not in ("overseas", "domestic"):
+        region = "overseas"
+    return {
+        "name": str(entry.get("name") or "").strip(),
+        "workflow_id": str(entry.get("workflow_id") or "").strip(),
+        "instance_type": instance_type,
+        "region": region,
+        "llm_enhance": bool(entry.get("llm_enhance", False)),
+        "llm_template_path": str(entry.get("llm_template_path") or "").strip(),
+        "input_nodes": [],
+    }
+
+
+def build_workflow_items(
+    raw_workflows: Any, raw_nodes: Any = None
+) -> list[dict[str, Any]]:
+    """把 AstrBot 配置归一化为 pydantic 可校验的工作流 dict 列表。
+
+    主形态：
+    - ``workflows``：template_list，每个工作流一项；
+    - ``workflow_nodes``：template_list，每个输入节点一项，通过 workflow_name 关联。
+
+    同时兼容旧版把输入节点嵌在工作流项里的配置。
     """
-    items: list[dict[str, Any]] = []
     if isinstance(raw_workflows, dict):
         raw_workflows = raw_workflows.get("items") or []
     if not isinstance(raw_workflows, list):
-        return items
+        return []
+
+    items: list[dict[str, Any]] = []
+    embedded_nodes: dict[str, list[dict[str, Any]]] = {}
     for entry in raw_workflows:
         if not isinstance(entry, dict):
             continue
-        nodes_raw = entry.get("input_nodes", [])
-        nodes: list[dict[str, Any]] = []
-        if isinstance(nodes_raw, str):
-            stripped = nodes_raw.strip()
-            if stripped:
-                try:
-                    parsed = json.loads(stripped)
-                except Exception:
-                    parsed = []
-                if isinstance(parsed, list):
-                    nodes = [n for n in parsed if isinstance(n, dict)]
-        elif isinstance(nodes_raw, list):
-            nodes = [n for n in nodes_raw if isinstance(n, dict)]
-        instance_type = str(entry.get("instance_type") or "Standard").strip()
-        if instance_type not in ("Standard", "Plus", "Ultra"):
-            instance_type = "Standard"
-        region = str(entry.get("region") or "overseas").strip()
-        if region not in ("overseas", "domestic"):
-            region = "overseas"
-        items.append(
-            {
-                "name": str(entry.get("name") or "").strip(),
-                "workflow_id": str(entry.get("workflow_id") or "").strip(),
-                "instance_type": instance_type,
-                "region": region,
-                "llm_enhance": bool(entry.get("llm_enhance", False)),
-                "llm_template_path": str(entry.get("llm_template_path") or "").strip(),
-                "input_nodes": nodes,
-            }
-        )
+        workflow = _workflow_dict_from_raw(entry)
+        name = workflow["name"]
+        items.append(workflow)
+        embedded_nodes[name] = _legacy_nodes_from_entry(entry)
+
+    if isinstance(raw_nodes, dict):
+        raw_nodes = raw_nodes.get("items") or []
+    has_embedded_nodes = any(
+        "input_nodes" in entry
+        or "input_nodes_extra" in entry
+        or any(f"input_node_{index}" in entry for index in range(1, NODE_FORM_SLOTS + 1))
+        for entry in (raw_workflows if isinstance(raw_workflows, list) else [])
+        if isinstance(entry, dict)
+    )
+    if raw_nodes is None or (not raw_nodes and has_embedded_nodes):
+        # 旧版配置：输入节点嵌在工作流项里（AstrBot 会自动补默认 workflow_nodes=[]）
+        for workflow in items:
+            workflow["input_nodes"] = embedded_nodes.get(workflow["name"], [])
+        return items
+
+    # 新版：按 workflow_name 关联，保持 template_list 中的添加顺序
+    nodes_by_workflow: dict[str, list[dict[str, Any]]] = {wf["name"]: [] for wf in items}
+    if isinstance(raw_nodes, dict):
+        raw_nodes = raw_nodes.get("items") or []
+    if isinstance(raw_nodes, list):
+        for raw in raw_nodes:
+            if not isinstance(raw, dict):
+                continue
+            workflow_name = str(raw.get("workflow_name") or "").strip()
+            node = _node_from_raw(raw)
+            if not workflow_name or node is None:
+                continue
+            nodes_by_workflow.setdefault(workflow_name, []).append(node)
+
+    for workflow in items:
+        workflow["input_nodes"] = nodes_by_workflow.get(workflow["name"], [])
     return items
 
 
 def dump_workflow_items(items: list[WorkflowItemSection]) -> list[dict[str, Any]]:
-    """把强类型工作流列表转成 AstrBot 配置存储格式（input_nodes 存 JSON 字符串）。"""
+    """把强类型工作流列表转成 AstrBot workflows template_list 条目。"""
+    return [
+        {
+            "__template_key": "workflow",
+            "name": str(wf.name or ""),
+            "workflow_id": str(wf.workflow_id or ""),
+            "instance_type": str(wf.instance_type or "Standard"),
+            "region": str(wf.region or "overseas"),
+            "llm_enhance": bool(wf.llm_enhance),
+            "llm_template_path": str(wf.llm_template_path or ""),
+        }
+        for wf in items
+    ]
+
+
+def dump_workflow_nodes(items: list[WorkflowItemSection]) -> list[dict[str, Any]]:
+    """把强类型工作流的输入节点展开为 workflow_nodes template_list 条目。"""
     result: list[dict[str, Any]] = []
     for wf in items:
-        nodes = [
-            {
-                "node_id": str(n.node_id or ""),
-                "field_name": str(n.field_name or "prompt"),
-                "field_value": str(n.field_value or ""),
-                "value_type": str(n.value_type or ""),
-                "label": str(n.label or ""),
-            }
-            for n in wf.input_nodes
-        ]
-        result.append(
-            {
-                "__template_key": "workflow",
-                "name": str(wf.name or ""),
-                "workflow_id": str(wf.workflow_id or ""),
-                "instance_type": str(wf.instance_type or "Standard"),
-                "region": str(wf.region or "overseas"),
-                "llm_enhance": bool(wf.llm_enhance),
-                "llm_template_path": str(wf.llm_template_path or ""),
-                "input_nodes": json.dumps(nodes, ensure_ascii=False),
-            }
-        )
+        for node in wf.input_nodes:
+            result.append(
+                {
+                    "__template_key": "input_node",
+                    "workflow_name": str(wf.name or ""),
+                    "node_id": str(node.node_id or ""),
+                    "field_name": str(node.field_name or "prompt"),
+                    "field_value": str(node.field_value or ""),
+                    "value_type": str(node.value_type or ""),
+                    "label": str(node.label or ""),
+                }
+            )
     return result
 
 
@@ -426,7 +512,7 @@ def build_config_model(data: dict[str, Any]) -> GenericConfig:
             "max_per_user_per_hour": int(_s(access, "max_per_user_per_hour", 0)),
             "admin_users": [str(u) for u in (_s(access, "admin_users", []) or [])],
         },
-        "workflows": {"items": build_workflow_items(data.get("workflows"))},
+        "workflows": {"items": build_workflow_items(data.get("workflows"), data.get("workflow_nodes"))},
     }
     return GenericConfig.model_validate(normalized)
 
@@ -462,4 +548,5 @@ def dump_config_dict(config: GenericConfig) -> dict[str, Any]:
             "admin_users": [str(u) for u in config.access.admin_users],
         },
         "workflows": dump_workflow_items(config.workflows.items),
+            "workflow_nodes": dump_workflow_nodes(config.workflows.items),
     }

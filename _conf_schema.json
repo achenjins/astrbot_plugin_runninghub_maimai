@@ -162,13 +162,20 @@
             "description": "设备类型",
             "type": "string",
             "default": "Standard",
-            "options": ["Standard", "Plus", "Ultra"]
+            "options": [
+              "Standard",
+              "Plus",
+              "Ultra"
+            ]
           },
           "region": {
             "description": "区域",
             "type": "string",
             "default": "overseas",
-            "options": ["overseas", "domestic"],
+            "options": [
+              "overseas",
+              "domestic"
+            ],
             "hint": "overseas=海外(runninghub.ai)；domestic=国内(runninghub.cn)"
           },
           "llm_enhance": {
@@ -180,14 +187,65 @@
             "description": "扩写模板路径（相对插件目录）",
             "type": "string",
             "default": ""
+          }
+        }
+      }
+    }
+  },
+  "workflow_nodes": {
+    "description": "输入节点列表",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "input_node": {
+        "name": "输入节点",
+        "hint": "想加几个就加几个；每个节点通过「所属工作流」关联",
+        "display_item": "workflow_name",
+        "items": {
+          "workflow_name": {
+            "description": "所属工作流",
+            "type": "string",
+            "default": "",
+            "hint": "必须与「工作流列表」中的 name 完全一致"
           },
-          "input_nodes": {
-            "description": "输入节点（JSON 数组）",
+          "node_id": {
+            "description": "节点 ID",
+            "type": "string",
+            "default": "",
+            "hint": "RunningHub 工作流节点右上角的编号"
+          },
+          "field_name": {
+            "description": "字段名",
+            "type": "string",
+            "default": "prompt",
+            "hint": "要控制的参数名，如 prompt / image / audio / width"
+          },
+          "field_value": {
+            "description": "默认值",
             "type": "text",
-            "default": "[]",
-            "editor_mode": true,
-            "editor_language": "json",
-            "hint": "每项格式：{\"node_id\":\"353\",\"field_name\":\"prompt\",\"field_value\":\"\",\"value_type\":\"prompt\",\"label\":\"提示词\"}。value_type 支持 prompt/text/default/image/audio/video；留空自动推断"
+            "default": "",
+            "hint": "留空=运行时由用户提供；填写=固定默认值"
+          },
+          "value_type": {
+            "description": "节点类型",
+            "type": "string",
+            "default": "",
+            "options": [
+              "",
+              "prompt",
+              "text",
+              "default",
+              "image",
+              "audio",
+              "video"
+            ],
+            "hint": "prompt=提示词；text=可编辑配置；default=固定值；image/audio/video=参考文件"
+          },
+          "label": {
+            "description": "输入说明",
+            "type": "string",
+            "default": "",
+            "hint": "等待用户上传时显示的中文说明"
           }
         }
       }
