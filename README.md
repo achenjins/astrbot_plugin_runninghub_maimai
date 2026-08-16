@@ -1,26 +1,15 @@
 # 麦麦画师 · RunningHub
 
-让机器人调用 RunningHub 工作流帮你出图、出视频：一句话文生图、多参考图 / 视频生成，结果自动发回聊天。
+让 AstrBot 调用 RunningHub 工作流出图、出视频，结果自动发回聊天。
 
-- 平台入口：[RunningHub 国外](https://www.runninghub.ai?inviteCode=bvhsaqdr) / [RunningHub 国内](https://www.runninghub.cn?inviteCode=8cq8uhl8)
+- 文生图 / 图生图 / 文生视频 / 多参考文件工作流
+- 图片、语音、视频交互式上传，可只传部分或「跳过剩余」
+- LLM 提示词扩写（支持模板上传/预览），命令 + 自然语言触发
+- 白名单、限频、管理员中断、可选自动撤回
+- AstrBot Pages 可视化管理工作流与输入节点
 
 > [!WARNING]
-> RunningHub 是付费平台，每次运行都会消耗余额 / 积分。建议装好后先配置「访问控制」。
-
-> [!NOTE]
-> 发送兼容 AstrBot 已接入的平台；自动撤回依赖 OneBot v11（NapCat / QQ），其他平台会自动跳过撤回。
-
----
-
-## 能做什么
-
-- 文生图 / 图生图 / 文生视频 / 多参考生视频，可配置多个工作流
-- 图片 / 语音 / 视频参考文件交互式上传，可只传部分或「跳过剩余」
-- 可编辑参数（分辨率、步数、CFG 等）运行前询问确认
-- 可选 LLM 提示词扩写，一句话也能出高质量图
-- 命令触发 + 自然语言触发
-- 用户 / 群白名单、每用户每小时限频、管理员中断
-- 结果自动发送，可选发后自动撤回
+> RunningHub 按次扣费，建议装好后先配置「访问控制」。自动撤回仅 NapCat / OneBot v11 生效。
 
 ---
 
@@ -33,92 +22,84 @@ cd astrobt-runninghub
 pip install -r requirements.txt
 ```
 
-装好后在 AstrBot WebUI 的插件管理里启用 / 重载插件。
+装好后在 AstrBot WebUI 启用 / 重载插件。
 
 ---
 
-## 三步跑通第一张图
+## 快速开始
 
-### 1. 注册并填写 API Key
+### 1. 填写 API Key
 
-1. 打开 [国内站](https://www.runninghub.cn?inviteCode=8cq8uhl8) 或 [海外站](https://www.runninghub.ai?inviteCode=bvhsaqdr) 注册（链接已带邀请码）。
-2. 打开对应平台的 API 页面复制 API Key：
-   - 海外 API 页面：<https://www.runninghub.ai/enterprise-api/consumerApi?inviteCode=bvhsaqdr>
-   - 国内 API 页面：<https://www.runninghub.cn/enterprise-api/consumerApi?inviteCode=8cq8uhl8>
-3. 打开 AstrBot 插件配置页，填入「国内 API Key」或「国外 API Key」。
+- [国内站注册](https://www.runninghub.cn?inviteCode=8cq8uhl8) / [海外站注册](https://www.runninghub.ai?inviteCode=bvhsaqdr)（链接已带邀请码）
+- 海外 API 页面：<https://www.runninghub.ai/enterprise-api/consumerApi?inviteCode=bvhsaqdr>
+- 国内 API 页面：<https://www.runninghub.cn/enterprise-api/consumerApi?inviteCode=8cq8uhl8>
+- 在插件配置中填「国内 API Key」或「国外 API Key」，两边 Key 不通用。
 
-> [!TIP]
-> 国内 / 国外账号和 Key 不通用，工作流在哪个站就填哪个 Key。
+### 2. 识别工作流
 
-### 2. 识别一个工作流
-
-在聊天里发：
-
-```
-/wf国外工作流 2087492768787685378 文生图
-```
-
-或：
-
-```
+```text
+/wf国外工作流 <工作流ID> <名称>
 /wf国内工作流 <工作流ID> <名称>
 ```
 
-看到「识别成功」后，去插件配置页的工作流列表里检查输入节点，按需删除多余节点。
+看到「识别成功」后，在配置页或 Pages 里删掉不需要的节点。
 
-> [!TIP]
-> AstrBot 4.24.2 及以上支持插件 Pages：在插件详情 → Pages 打开「workflow-editor」，
-> 可以可视化增删工作流与输入节点、拖动排序、一键智能识别并保存，无需在聊天窗口操作。
->
-> 内置模板为 `prompt/anima3_prompt_template.txt`；页面上传的模板会保存到
-> AstrBot 的 `data/plugin_data/<插件目录>/prompt/`，更新插件不会丢失。
+### 3. 运行
 
+```text
+/wf运行 <工作流名> <描述>
+```
 
+例如：
 
-### 体验工作流说明（可选）
+```text
+/wf运行 文生图 原神刻晴
+```
 
-这是我在 MaiBot 插件里做的**文生图体验工作流**，已删除内部高成本「豆包提示词优化」节点，适合第一次试运行。注意：打开后不能直接使用，因为没有提示词优化节点；想体验完整原版可以去下方 UP 主视频里找。
+需要文件时机器人会引导上传；不想传就回「跳过剩余」。
 
-- 海外版：[海外体验工作流](https://www.runninghub.ai/zh-cn/workflow/2087492768787685378?inviteCode=bvhsaqdr)
-- 国内版：[国内体验工作流](https://www.runninghub.cn/workflow/2087939838371786753?inviteCode=8cq8uhl8)
+<details>
+<summary>体验工作流（可选）</summary>
+
+这是为第一次试运行准备的文生图工作流，已删除高成本「豆包提示词优化」节点。
+
+- 海外版：<https://www.runninghub.ai/zh-cn/workflow/2087492768787685378?inviteCode=bvhsaqdr>
+- 国内版：<https://www.runninghub.cn/workflow/2087939838371786753?inviteCode=8cq8uhl8>
 
 > [!NOTE]
-> 这个工作流魔改自 B 站视频 [BV1arGt6wExL](https://www.bilibili.com/video/BV1arGt6wExL)，感谢 UP 主 [@每日提钢小助手5号](https://space.bilibili.com/3690999272442168) 分享的工作流，如侵权可联系删除。UP 主原版自带提示词优化，会消耗 RunningHub 余额。
+> 工作流魔改自 B 站视频 [BV1arGt6wExL](https://www.bilibili.com/video/BV1arGt6wExL)，感谢 UP 主 [@每日提钢小助手5号](https://space.bilibili.com/3690999272442168)，如侵权可联系删除。
 
 > [!IMPORTANT]
-> 打开工作流并保存后，工作流 ID（链接里的数字）会变成你账号专属 ID；识别命令里要换成你保存后的 ID。
+> 打开并保存后，工作流 ID 会变成你账号专属 ID，识别时请换用新 ID。
 
-导入命令（按平台二选一）：
+导入：
 
-```
+```text
 /wf国外工作流 2087492768787685378 文生图
 /wf国内工作流 2087939838371786753 文生图
 ```
 
-导入后做两件事：
+导入后只保留提示词节点（海外版为 353 号），开启 LLM 扩写并选择 `prompt/anima3_prompt_template.txt`。
 
-1. **只保留「提示词」节点**：在插件配置页或可视化页面的工作流里，把识别出的节点删到只剩提示词节点（海外版提示词节点是 353 号）。
-2. **启用 LLM 扩写并选择模板**：打开该工作流的「启用 LLM 扩写」，模板选择 `prompt/anima3_prompt_template.txt`。
+费用参考：Standard 设备约 2 分钟 / 约 25 RH 币；Ultra 仅会员可用且更贵。
 
-运行示例：
+</details>
 
-```
-/wf运行 文生图 原神刻晴
-```
+---
 
-设备与费用参考：
+## Pages 页面怎么用
 
-- 推荐 **Standard** 设备，出图约 **2 分钟**；
-- 平均消耗约 **25 RH 币**（会员约合 **0.04 元**）；
-- **Ultra** 仅会员可用，消耗更高。
+需要 AstrBot 4.24.2+：**插件详情 → Pages → workflow-editor**（页面路径在插件包里，打开后会连接插件）。
 
-### 3. 跑一张图
+页面能做什么：
 
-```
-/wf运行 文生图 原神刻晴
-```
+- 新建 / 编辑 / 删除工作流与输入节点；
+- 节点拖动排序，支持搜索和国内外筛选；
+- 「识别」后按复选框挑选要添加的节点，支持全选；
+- LLM 扩写模板上传 / 预览 / 选择，保存在 `data/plugin_data/<插件目录>/prompt/`，更新插件不丢失；
+- 所有修改点「保存配置」才生效，保存后插件热更新。
 
-如果工作流需要参考图 / 音频 / 视频，机器人会引导你上传；不想传就回「跳过剩余」。完成后结果会自动发回聊天。
+旧版 AstrBot 没有 Pages 入口时，仍可用插件配置页里的「工作流列表 + 输入节点列表」动态表单。
 
 ---
 
@@ -129,106 +110,30 @@ pip install -r requirements.txt
 | `/wf运行 <工作流名> [描述]` | 运行工作流 |
 | `/wf中断` | 中断输入会话或按编号取消任务 |
 | `/wf工作流` | 列出已配置工作流 |
-| `/wf国外工作流 <ID> [名称]` | 识别 runninghub.ai 工作流关键节点 |
-| `/wf国内工作流 <ID> [名称]` | 识别 runninghub.cn 工作流关键节点 |
-| `/wf详细国外工作流 <ID> [名称]` | LLM 详细识别全部参数 |
-| `/wf详细国内工作流 <ID> [名称]` | LLM 详细识别全部参数 |
+| `/wf国外工作流 <ID> [名称]` | 识别海外站工作流 |
+| `/wf国内工作流 <ID> [名称]` | 识别国内站工作流 |
+| `/wf详细国外工作流 <ID> [名称]` | LLM 详细识别海外工作流 |
+| `/wf详细国内工作流 <ID> [名称]` | LLM 详细识别国内工作流 |
 
 ---
 
 ## 自然语言触发
 
-工作流只有一个「提示词（prompt）」输入节点时，不用敲命令，直接说：
+工作流只有一个提示词节点时，直接说：
 
-```
+```text
 帮我画一只甘雨，蓝色长发，全身立绘
 ```
 
-机器人会自动调用工作流并把结果发回。新增 / 改名工作流后，重载插件刷新可用列表。
-
----
-
-## 配置项速查
-
-### RunningHub 服务
-
-| 配置项 | 说明 |
-| --- | --- |
-| `api_key` | 国外 API Key |
-| `api_key_cn` | 国内 API Key |
-
-### 生成参数
-
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `poll_interval` | 15 | 任务轮询间隔（秒） |
-| `max_wait` | 1800 | 任务最大等待时间（秒） |
-| `max_concurrent` | 2 | 同时进行任务数上限 |
-| `download_timeout` | 120 | 下载结果超时（秒） |
-
-### 功能设置
-
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `enable` | false | 自动撤回开关 |
-| `recall_seconds` | 90 | 发送后多少秒撤回，0 表示不撤回 |
-| `result_notice` | true | 完成后是否追加「生成完成」消息 |
-| `use_llm` | true | 使用 LLM 识别节点，失败自动回退规则 |
-| `model` / `enhance_model` | 空 | 识别 / 扩写使用的模型提供商，留空用默认模型 |
-
-### 访问控制
-
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `allow_users` | [] | 用户 ID 白名单，留空不限 |
-| `allow_groups` | [] | 群号白名单，留空不限群 |
-| `max_per_user_per_hour` | 0 | 每用户每小时上限，0 不限 |
-| `admin_users` | [] | 管理员 ID，可中断所有人任务 |
-
-> [!WARNING]
-> 默认全部放行，任何人都能触发任务。建议至少配置白名单或限频。
-
-### 工作流列表
-
-| 配置项 | 说明 |
-| --- | --- |
-| `name` | 工作流名称，用于 /wf运行 |
-| `workflow_id` | RunningHub 工作流 ID |
-| `instance_type` | Standard / Plus / Ultra |
-| `region` | overseas=国外，domestic=国内 |
-| `llm_enhance` / `llm_template_path` | 提示词扩写开关与模板路径 |
-
-### 输入节点列表
-
-输入节点是独立的「添加条目」列表，想加几个就加几个：
-
-| 配置项 | 说明 |
-| --- | --- |
-| `workflow_name` | 所属工作流，需与上面工作流的 `name` 完全一致 |
-| `node_id` | RunningHub 节点 ID |
-| `field_name` | 要控制的字段名，如 prompt / image / audio / width |
-| `field_value` | 默认值，留空运行时询问 |
-| `value_type` | 节点类型：prompt / text / default / image / audio / video |
-| `label` | 等待上传时显示的中文说明 |
+新增 / 改名工作流后重载插件，刷新可用名称。
 
 ---
 
 ## FAQ
 
-**Q：识别报「对应 API Key 未填写」？**
-A：检查工作流区域和已填的 Key 是否对应：国内工作流填 `api_key_cn`，国外填 `api_key`。
-
-**Q：识别不出节点？**
-A：普通识别只认关键节点，改用 `/wf详细*`，或去配置页手动添加。
-
-**Q：上传文件后没反应？**
-A：确认插件已重载，并查看日志中是否有「已接收输入 / 任务已提交」。
-
-**Q：为什么自然语言没触发生成？**
-A：只有单个「提示词」节点的工作流支持自然语言；需要传文件或改参数时请用 `/wf运行`。
-
-**Q：自动撤回没生效？**
-A：自动撤回仅 NapCat / OneBot v11 平台可用；其他平台会自动跳过。
+- **识别报 API Key 未填写？** 国内工作流用 `api_key_cn`，海外用 `api_key`。
+- **自然语言不触发？** 带文件 / 参数节点的工作流请用 `/wf运行`。
+- **自动撤回没生效？** 仅 NapCat / OneBot v11 平台支持。
 
 ---
 
