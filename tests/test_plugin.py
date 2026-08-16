@@ -468,6 +468,14 @@ def test_page_entry_exists() -> None:
     text = page.read_text(encoding="utf-8")
     assert "AstrBotPluginPage" in text
     assert "page/config" in text
+    assert "style.css" in text
+
+    style = PLUGIN_DIR / "pages" / "workflow-editor" / "style.css"
+    assert style.is_file()
+    assert "mask-image" in style.read_text(encoding="utf-8")
+
+    icon_dir = PLUGIN_DIR / "pages" / "workflow-editor" / "assets" / "icons"
+    assert len(list(icon_dir.glob("*.svg"))) >= 18
 
 
 def test_page_config_payload_exposes_workflow_nodes(

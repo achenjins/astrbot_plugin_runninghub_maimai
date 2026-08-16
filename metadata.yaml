@@ -1,7 +1,7 @@
 ﻿name: runninghub_workflow_adapter
 desc: 楹﹂害鐢诲笀 路 RunningHub锛氫粠涓€鍙ヨ瘽鏂囩敓鍥撅紝鍒板鍙傝€冨浘 / 瑙嗛鐢熸垚锛岀粺缁熻嚜鍔ㄥ畬鎴愬苟鎶婃垚鍝佸彂鍥炶亰澶┿€傛敮鎸佽嚜瀹氫箟宸ヤ綔娴併€丄I 鎵╁啓鎻愮ず璇嶄笌闄愭祦闃插埛锛岄€傞厤 NapCat / OneBot v11 QQ銆?
 author: 閿︾憻
-version: 2.0.8
+version: 2.0.9
 repo: https://github.com/achenjins/astrbot_plugin_runninghub_maimai
 social_link: https://github.com/achenjins
 display_name: 楹﹂害鐢诲笀 路 RunningHub
@@ -14,4 +14,5 @@ tags:
   - 濞变箰
   - AI缁樺浘
   - 鏂囩敓鍥?
+
 

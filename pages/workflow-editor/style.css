@@ -1,0 +1,30 @@
+.icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  background-color: currentColor;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+.icon-sitemap  { -webkit-mask-image: url("./assets/icons/sitemap.svg");  mask-image: url("./assets/icons/sitemap.svg"); }
+.icon-refresh  { -webkit-mask-image: url("./assets/icons/refresh.svg");  mask-image: url("./assets/icons/refresh.svg"); }
+.icon-plus     { -webkit-mask-image: url("./assets/icons/plus.svg");     mask-image: url("./assets/icons/plus.svg"); }
+.icon-save     { -webkit-mask-image: url("./assets/icons/save.svg");     mask-image: url("./assets/icons/save.svg"); }
+.icon-pencil   { -webkit-mask-image: url("./assets/icons/pencil.svg");   mask-image: url("./assets/icons/pencil.svg"); }
+.icon-delete   { -webkit-mask-image: url("./assets/icons/delete.svg");   mask-image: url("./assets/icons/delete.svg"); }
+.icon-close    { -webkit-mask-image: url("./assets/icons/close.svg");    mask-image: url("./assets/icons/close.svg"); }
+.icon-up       { -webkit-mask-image: url("./assets/icons/up.svg");       mask-image: url("./assets/icons/up.svg"); }
+.icon-drag     { -webkit-mask-image: url("./assets/icons/drag.svg");     mask-image: url("./assets/icons/drag.svg"); }
+.icon-prompt   { -webkit-mask-image: url("./assets/icons/prompt.svg");   mask-image: url("./assets/icons/prompt.svg"); }
+.icon-tune     { -webkit-mask-image: url("./assets/icons/tune.svg");     mask-image: url("./assets/icons/tune.svg"); }
+.icon-image    { -webkit-mask-image: url("./assets/icons/image.svg");    mask-image: url("./assets/icons/image.svg"); }
+.icon-audio    { -webkit-mask-image: url("./assets/icons/audio.svg");    mask-image: url("./assets/icons/audio.svg"); }
+.icon-video    { -webkit-mask-image: url("./assets/icons/video.svg");    mask-image: url("./assets/icons/video.svg"); }
+.icon-lock     { -webkit-mask-image: url("./assets/icons/lock.svg");     mask-image: url("./assets/icons/lock.svg"); }
+.icon-auto     { -webkit-mask-image: url("./assets/icons/auto.svg");     mask-image: url("./assets/icons/auto.svg"); }
+.icon-magnify  { -webkit-mask-image: url("./assets/icons/magnify.svg");  mask-image: url("./assets/icons/magnify.svg"); }
+.icon-paperclip{ -webkit-mask-image: url("./assets/icons/paperclip.svg"); mask-image: url("./assets/icons/paperclip.svg"); }
+.rotate-180 { transform: rotate(180deg); }
