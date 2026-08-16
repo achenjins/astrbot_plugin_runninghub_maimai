@@ -596,6 +596,11 @@ function populateTemplateSelect(currentPath = "") {
     options.push(`<option value="${esc(t.path)}">${esc(t.path)} · ${formatSize(t.size)}</option>`);
   }
   sel.innerHTML = options.join("");
+  if (currentPath && Array.from(sel.options).some((option) => option.value === currentPath)) {
+    sel.value = currentPath;
+  } else {
+    sel.value = "";
+  }
   updateTemplateHint();
 }
 
