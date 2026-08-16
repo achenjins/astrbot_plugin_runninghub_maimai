@@ -1,0 +1,196 @@
+{
+  "config_version": {
+    "description": "配置版本号（一般无需修改）",
+    "type": "string",
+    "default": "2.0.0",
+    "invisible": true
+  },
+  "server": {
+    "description": "RunningHub 服务",
+    "type": "object",
+    "hint": "API Key 在 RunningHub 平台个人中心获取，务必保密",
+    "items": {
+      "base_url": {
+        "description": "国外平台基地址（runninghub.ai）",
+        "type": "string",
+        "default": "https://www.runninghub.ai"
+      },
+      "api_key": {
+        "description": "国外 RunningHub API Key",
+        "type": "string",
+        "default": "",
+        "obvious_hint": true,
+        "hint": "务必保密；只填一个平台时，识别/拉取默认使用该 key"
+      },
+      "base_url_cn": {
+        "description": "国内平台基地址（runninghub.cn）",
+        "type": "string",
+        "default": "https://www.runninghub.cn"
+      },
+      "api_key_cn": {
+        "description": "国内 RunningHub API Key",
+        "type": "string",
+        "default": "",
+        "obvious_hint": true,
+        "hint": "可与国外只填一个"
+      }
+    }
+  },
+  "generation": {
+    "description": "生成与轮询参数",
+    "type": "object",
+    "items": {
+      "poll_interval": {
+        "description": "任务轮询间隔（秒）",
+        "type": "int",
+        "default": 15
+      },
+      "max_wait": {
+        "description": "任务最大等待时间（秒）",
+        "type": "int",
+        "default": 1800
+      },
+      "max_concurrent": {
+        "description": "同时进行中的任务数上限",
+        "type": "int",
+        "default": 2
+      },
+      "download_timeout": {
+        "description": "下载结果超时（秒）",
+        "type": "int",
+        "default": 120
+      }
+    }
+  },
+  "feature": {
+    "description": "功能设置",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用发送后自动撤回",
+        "type": "bool",
+        "default": false,
+        "hint": "仅 OneBot v11（NapCat）平台可撤回；AstrBot 通用通道无撤回 API"
+      },
+      "recall_seconds": {
+        "description": "发送后自动撤回的秒数",
+        "type": "int",
+        "default": 90,
+        "hint": "0 表示不撤回"
+      },
+      "result_notice": {
+        "description": "完成后追加「生成完成」确认消息",
+        "type": "bool",
+        "default": true,
+        "hint": "AstrBot 没有 Maisaka 主动回复，迁移后由插件直接发送确认"
+      },
+      "use_llm": {
+        "description": "用 LLM 识别输入节点与配置节点",
+        "type": "bool",
+        "default": true,
+        "hint": "失败时自动回退启发式规则"
+      },
+      "model": {
+        "description": "识别使用的模型提供商",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用默认/当前会话模型",
+        "_special": "select_provider"
+      },
+      "enhance_model": {
+        "description": "提示词扩写使用的模型提供商",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用默认/当前会话模型",
+        "_special": "select_provider"
+      }
+    }
+  },
+  "access": {
+    "description": "访问控制与费用保护",
+    "type": "object",
+    "hint": "默认全部放行，与旧版行为一致",
+    "items": {
+      "allow_users": {
+        "description": "用户 ID 白名单",
+        "type": "list",
+        "default": [],
+        "hint": "留空表示不限制任何用户"
+      },
+      "allow_groups": {
+        "description": "群组 ID 白名单",
+        "type": "list",
+        "default": [],
+        "hint": "留空表示不限制群组；私聊不受群组白名单约束"
+      },
+      "max_per_user_per_hour": {
+        "description": "每用户每小时任务上限",
+        "type": "int",
+        "default": 0,
+        "hint": "0 表示不限频"
+      },
+      "admin_users": {
+        "description": "管理员用户 ID",
+        "type": "list",
+        "default": [],
+        "hint": "管理员可用 /rh中断 中断所有人的任务"
+      }
+    }
+  },
+  "workflows": {
+    "description": "工作流列表",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "workflow": {
+        "name": "工作流",
+        "hint": "推荐用聊天命令 /识别工作流 自动生成；也可在此手动添加",
+        "display_item": "name",
+        "items": {
+          "name": {
+            "description": "工作流名称",
+            "type": "string",
+            "default": "",
+            "hint": "用于 /rh运行 <名称> 调用"
+          },
+          "workflow_id": {
+            "description": "RunningHub 工作流 ID",
+            "type": "string",
+            "default": ""
+          },
+          "instance_type": {
+            "description": "设备类型",
+            "type": "string",
+            "default": "Standard",
+            "options": ["Standard", "Plus", "Ultra"]
+          },
+          "region": {
+            "description": "区域",
+            "type": "string",
+            "default": "overseas",
+            "options": ["overseas", "domestic"],
+            "hint": "overseas=海外(runninghub.ai)；domestic=国内(runninghub.cn)"
+          },
+          "llm_enhance": {
+            "description": "启用 LLM 扩写",
+            "type": "bool",
+            "default": false
+          },
+          "llm_template_path": {
+            "description": "扩写模板路径（相对插件目录）",
+            "type": "string",
+            "default": ""
+          },
+          "input_nodes": {
+            "description": "输入节点（JSON 数组）",
+            "type": "text",
+            "default": "[]",
+            "editor_mode": true,
+            "editor_language": "json",
+            "hint": "每项格式：{\"node_id\":\"353\",\"field_name\":\"prompt\",\"field_value\":\"\",\"value_type\":\"prompt\",\"label\":\"提示词\"}。value_type 支持 prompt/text/default/image/audio/video；留空自动推断"
+          }
+        }
+      }
+    }
+  }
+}
