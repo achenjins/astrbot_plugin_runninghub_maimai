@@ -655,3 +655,15 @@ def test_prompt_templates_live_in_persistent_data_dir(
     assert directory != (PLUGIN_DIR / "prompt")
     # 内置种子模板会自动复制到持久化目录
     assert (directory / "anima3_prompt_template.txt").is_file()
+
+def test_template_list_merges_files_from_plugin_dir(
+    star: plugin_main.RunningHubGenericPlugin,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fake_plugin = tmp_path / "fake_plugin"
+    (fake_plugin / "prompt").mkdir(parents=True)
+    (fake_plugin / "prompt" / "manual_ref2va.md").write_text("manual", encoding="utf-8")
+    monkeypatch.setattr(plugin_main, "_PLUGIN_DIR", fake_plugin)
+    paths = [item["path"] for item in star._list_prompt_templates()]
+    assert "prompt/manual_ref2va.md" in paths

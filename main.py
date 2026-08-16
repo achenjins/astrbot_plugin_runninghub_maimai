@@ -2937,22 +2937,57 @@ class RunningHubGenericPlugin(Star):
         return target
 
 
+    def _resolve_prompt_template(self, name: str) -> Path | None:
+        """读取模板时按「用户持久化目录 → 插件内置目录」顺序解析。"""
+        raw = str(name or "").strip().replace("\\", "/")
+        if raw.startswith("prompt/"):
+            raw = raw[len("prompt/"):]
+        if (
+            not raw
+            or raw in {".", ".."}
+            or raw.startswith((".", "/"))
+            or "/" in raw
+            or "\\" in raw
+        ) or not raw.lower().endswith((".txt", ".md")):
+            return None
+        user_target = (self._prompt_templates_dir() / raw).resolve()
+        if user_target.is_file():
+            return user_target
+        bundled_target = (_PLUGIN_DIR / "prompt" / raw).resolve()
+        if bundled_target.is_file():
+            return bundled_target
+        return user_target
+
+
     def _list_prompt_templates(self) -> list[dict[str, Any]]:
+        """列出所有可用模板：持久化目录优先，插件内置目录兜底合并。"""
+        templates: dict[str, dict[str, Any]] = {}
         directory = self._prompt_templates_dir()
-        templates: list[dict[str, Any]] = []
-        for path in directory.iterdir():
-            if not path.is_file() or not path.name.lower().endswith((".txt", ".md")):
+        bundled = _PLUGIN_DIR / "prompt"
+        roots = [directory]
+        if bundled.is_dir() and bundled.resolve() != directory.resolve():
+            roots.append(bundled)
+        for root in roots:
+            try:
+                entries = list(root.iterdir())
+            except OSError:
                 continue
-            templates.append(
-                {
+            for path in entries:
+                if not path.is_file() or not path.name.lower().endswith((".txt", ".md")):
+                    continue
+                if path.name in templates:
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                templates[path.name] = {
                     "name": path.name,
                     "path": f"prompt/{path.name}",
-                    "size": path.stat().st_size,
-                    "modified": int(path.stat().st_mtime),
+                    "size": stat.st_size,
+                    "modified": int(stat.st_mtime),
                 }
-            )
-        templates.sort(key=lambda item: str(item["name"]).lower())
-        return templates
+        return sorted(templates.values(), key=lambda item: str(item["name"]).lower())
 
     async def handle_page_list_prompt_templates(self):
         """可视化页面 API：列出扩写提示词模板。"""
@@ -2966,7 +3001,7 @@ class RunningHubGenericPlugin(Star):
             from quart import request as web_request
         except ImportError:
             from flask import request as web_request
-        target = self._safe_prompt_template(web_request.args.get("name", ""))
+        target = self._resolve_prompt_template(web_request.args.get("name", ""))
         if target is None or not target.is_file():
             return self._web_jsonify({"success": False, "message": "模板不存在或文件名不合法"})
         if target.stat().st_size > 2 * 1024 * 1024:
