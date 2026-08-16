@@ -41,7 +41,7 @@ from astrbot.api.message_components import Image as ImageComponent
 from astrbot.api.message_components import Record as RecordComponent
 from astrbot.api.message_components import Video as VideoComponent
 from astrbot.api.star import Context, Star
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_plugin_data_path
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _PLUGIN_PACKAGE = __package__ or ""
@@ -660,7 +660,10 @@ class RunningHubGenericPlugin(Star):
             return ""
         resolved = Path(template_path)
         if not resolved.is_absolute():
-            resolved = _PLUGIN_DIR / resolved
+            # 配置值仍是相对路径：优先读用户持久化目录（更新不丢失），
+            # 找不到时回退到插件自带的 prompt/ 目录。
+            user_resolved = self._prompt_templates_dir() / resolved
+            resolved = user_resolved if user_resolved.is_file() else (_PLUGIN_DIR / resolved)
         try:
             return resolved.read_text(encoding="utf-8")
         except OSError as exc:
@@ -2882,9 +2885,28 @@ class RunningHubGenericPlugin(Star):
         return self._web_jsonify({"success": True, "method": method, "nodes": detected})
 
     def _prompt_templates_dir(self) -> Path:
-        """扩写提示词模板目录（相对插件目录 prompt/）。"""
-        directory = _PLUGIN_DIR / "prompt"
+        """用户扩写模板目录（AstrBot 持久化目录，插件更新后不会丢失）。
+
+        插件目录里的 prompt/ 只作为内置种子模板；首次使用时会复制到
+        ``data/plugin_data/<插件目录>/prompt/``，之后页面上下传的模板都
+        保存在这里，更新插件不会被覆盖。
+        """
+        directory = (
+            Path(get_astrbot_plugin_data_path()).resolve()
+            / _PLUGIN_DIR.name
+            / "prompt"
+        )
         directory.mkdir(parents=True, exist_ok=True)
+        bundled = _PLUGIN_DIR / "prompt"
+        if bundled.is_dir():
+            for seed in bundled.iterdir():
+                if seed.is_file() and seed.name.lower().endswith((".txt", ".md")):
+                    target = directory / seed.name
+                    if not target.exists():
+                        try:
+                            target.write_bytes(seed.read_bytes())
+                        except OSError:
+                            pass
         return directory
 
     def _safe_prompt_template(self, name: str) -> Path | None:

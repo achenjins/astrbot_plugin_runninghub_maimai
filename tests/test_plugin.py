@@ -646,3 +646,12 @@ def test_upload_file_uses_legacy_workflow_endpoint() -> None:
     assert called.args[0].endswith("/task/openapi/upload")
     assert called.kwargs["data"]["apiKey"] == "k"
     assert called.kwargs["data"]["fileType"] == "input"
+
+def test_prompt_templates_live_in_persistent_data_dir(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    directory = star._prompt_templates_dir()
+    assert "plugin_data" in directory.parts
+    assert directory != (PLUGIN_DIR / "prompt")
+    # 内置种子模板会自动复制到持久化目录
+    assert (directory / "anima3_prompt_template.txt").is_file()
