@@ -9,204 +9,211 @@
 *{box-sizing:border-box}
 .hidden{display:none!important}
 :root{
-  --bg:#f4f6fb;--panel:#ffffff;--panel-soft:#f8fafd;--text:#1b2333;--muted:#69748c;
-  --line:#e6eaf3;--line-strong:#d6dcec;--accent:#5468ff;--accent-2:#8b5cf6;
-  --ok:#0ea36e;--warn:#d97706;--danger:#e5484d;--shadow:0 1px 2px rgba(23,32,51,.05),0 10px 30px rgba(23,32,51,.07);
-  --shadow-lg:0 18px 50px rgba(15,23,42,.18);--radius:18px;
+  --primary:#3c96ca;--primary-dark:#1565c0;--primary-light:#e8f3fa;
+  --secondary:#2f86bd;--info:#03c9d7;--success:#00c853;--warning:#ffc107;--error:#f44336;
+  --bg:#ffffff;--surface:#ffffff;--surface-2:#f6f7fb;--text:#1b1c1d;--muted:rgba(0,0,0,.62);
+  --border:#d0d0d0;--divider:rgba(0,0,0,.08);
+  --radius:12px;--shadow:0 1px 2px rgba(0,0,0,.06);--shadow-2:0 6px 18px rgba(0,0,0,.10);
+  --overlay:rgba(0,0,0,.46);
 }
 @media (prefers-color-scheme: dark){
   :root{
-    --bg:#0d1017;--panel:#151923;--panel-soft:#1b202d;--text:#edf1f9;--muted:#97a0b5;
-    --line:#252c3d;--line-strong:#323b50;--accent:#7b8aff;--accent-2:#a78bfa;
-    --ok:#34d399;--warn:#fbbf24;--danger:#f87171;
-    --shadow:0 1px 2px rgba(0,0,0,.3),0 12px 34px rgba(0,0,0,.35);
-    --shadow-lg:0 22px 60px rgba(0,0,0,.5);
+    --primary:#5ba4d4;--primary-dark:#3a8ab8;--primary-light:#1a2e3d;
+    --secondary:#4a95c4;--info:#03c9d7;--success:#52c41a;--warning:#faad14;--error:#ff4d4f;
+    --bg:#1a1a1a;--surface:#242424;--surface-2:#2a2a2a;--text:#e8eaed;--muted:rgba(255,255,255,.68);
+    --border:#3a3a3a;--divider:rgba(255,255,255,.08);
+    --shadow:0 1px 2px rgba(0,0,0,.42);--shadow-2:0 8px 22px rgba(0,0,0,.42);
+    --overlay:rgba(0,0,0,.58);
   }
 }
 html,body{height:100%}
 body{
-  margin:0;background:
-    radial-gradient(1100px 420px at 82% -10%,rgba(84,104,255,.10),transparent 62%),
-    radial-gradient(900px 380px at -8% 8%,rgba(139,92,246,.09),transparent 60%),
-    var(--bg);
-  color:var(--text);font:14px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.5 Roboto,"Helvetica Neue",Arial,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
   -webkit-font-smoothing:antialiased;
 }
+svg.icon{display:block;flex:0 0 auto}
+.rotate-180{transform:rotate(180deg)}
 button{font:inherit;cursor:pointer}
-button:disabled{opacity:.48;cursor:not-allowed}
+button:disabled{opacity:.45;cursor:not-allowed}
 input,select,textarea{
-  font:inherit;color:var(--text);background:var(--panel-soft);border:1px solid var(--line-strong);
-  border-radius:11px;padding:9px 11px;outline:none;transition:border-color .15s,box-shadow .15s;
+  font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--border);
+  border-radius:10px;min-height:42px;padding:9px 12px;outline:none;transition:border-color .15s,box-shadow .15s;
 }
-input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(84,104,255,.14)}
+input:hover,select:hover,textarea:hover{border-color:rgba(60,150,202,.55)}
+input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 1px var(--primary)}
 textarea{resize:vertical;min-height:68px}
-.app{max-width:1440px;margin:0 auto;padding:22px 24px 64px}
+.app{max-width:1400px;margin:0 auto;padding:22px 24px 72px}
 .topbar{
-  position:sticky;top:12px;z-index:30;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
-  padding:12px 16px;border:1px solid var(--line);border-radius:20px;background:rgba(255,255,255,.82);
-  box-shadow:var(--shadow);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:12px;height:64px;
+  padding:0 4px;margin-bottom:22px;background:var(--bg);border-bottom:1px solid var(--divider);
 }
-@media (prefers-color-scheme: dark){.topbar{background:rgba(21,25,35,.82)}}
-.brand{display:flex;align-items:center;gap:12px;min-width:0;margin-right:auto}
+.brand{display:flex;align-items:center;gap:10px;min-width:0;margin-right:auto}
 .logo-mark{
-  width:42px;height:42px;border-radius:13px;flex:0 0 auto;display:grid;place-items:center;
-  background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;font-size:20px;
-  box-shadow:0 8px 22px rgba(84,104,255,.32);
+  width:38px;height:38px;border-radius:10px;flex:0 0 auto;display:grid;place-items:center;
+  background:var(--primary-light);color:var(--primary);
 }
-.brand h1{margin:0;font-size:17px;letter-spacing:.2px}
-.brand .sub{margin:0;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.brand h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
+.brand .sub{margin:1px 0 0;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .btn{
-  border:1px solid var(--line-strong);background:var(--panel);color:var(--text);
-  padding:8px 13px;border-radius:11px;display:inline-flex;align-items:center;gap:6px;
-  transition:transform .12s,box-shadow .12s,border-color .12s,background .12s;font-weight:600;font-size:13px;
+  min-height:36px;padding:0 14px;border-radius:10px;border:1px solid transparent;background:var(--surface-2);color:var(--text);
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;font-size:13px;font-weight:500;
+  transition:background .15s,color .15s,border-color .15s,box-shadow .15s,opacity .15s;
 }
-.btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:var(--shadow)}
-.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));border-color:transparent;color:#fff;box-shadow:0 8px 20px rgba(84,104,255,.28)}
-.btn.danger{color:var(--danger);border-color:rgba(229,72,77,.3)}
-.btn.danger:hover:not(:disabled){background:rgba(229,72,77,.08)}
-.btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}
-.btn.ghost:hover:not(:disabled){background:var(--panel-soft);color:var(--text)}
-.btn.small{padding:5px 8px;font-size:12px;border-radius:9px}
+.btn:hover:not(:disabled){background:var(--primary-light)}
+.btn.primary{background:var(--primary);color:#fff}
+.btn.primary:hover:not(:disabled){background:var(--primary-dark)}
+.btn.outlined{background:transparent;border-color:var(--border)}
+.btn.outlined:hover:not(:disabled){border-color:var(--primary);color:var(--primary);background:var(--primary-light)}
+.btn.text{background:transparent}
+.btn.text:hover:not(:disabled){background:var(--primary-light)}
+.btn.danger-text{background:transparent;color:var(--error)}
+.btn.danger-text:hover:not(:disabled){background:rgba(244,67,54,.08)}
+.btn.small{min-height:30px;padding:0 10px;font-size:12px;border-radius:8px}
 .icon-btn{
-  width:30px;height:30px;display:inline-grid;place-items:center;border-radius:9px;border:1px solid transparent;
+  width:36px;height:36px;display:inline-grid;place-items:center;border-radius:10px;border:none;
   background:transparent;color:var(--muted);transition:.15s;
 }
-.icon-btn:hover{background:var(--panel-soft);color:var(--text);border-color:var(--line)}
-.icon-btn.danger:hover{background:rgba(229,72,77,.1);color:var(--danger)}
-.icon-btn[disabled]{opacity:.3;cursor:not-allowed}
-.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}
+.icon-btn:hover{background:var(--primary-light);color:var(--primary)}
+.icon-btn.danger:hover{background:rgba(244,67,54,.08);color:var(--error)}
+.icon-btn.small{width:30px;height:30px;border-radius:8px}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:0 0 18px}
 .stat-card{
-  padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:var(--shadow);
-  display:flex;align-items:center;gap:12px;transition:transform .15s;
+  min-height:86px;padding:14px 16px;border:1px solid var(--divider);border-radius:var(--radius);
+  background:var(--surface);box-shadow:var(--shadow);display:flex;align-items:center;gap:12px;
+  transition:box-shadow .18s,border-color .18s;
 }
-.stat-card:hover{transform:translateY(-2px)}
-.stat-icon{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-size:18px;flex:0 0 auto}
-.stat-icon.blue{background:rgba(84,104,255,.12);color:var(--accent)}
-.stat-icon.purple{background:rgba(139,92,246,.12);color:var(--accent-2)}
-.stat-icon.green{background:rgba(14,163,110,.12);color:var(--ok)}
-.stat-icon.amber{background:rgba(217,119,6,.12);color:var(--warn)}
-.stat-body b{font-size:21px;line-height:1.1;display:block}
+.stat-card:hover{border-color:var(--border);box-shadow:var(--shadow-2)}
+.stat-icon{width:44px;height:44px;border-radius:11px;display:grid;place-items:center;flex:0 0 auto}
+.stat-icon.blue{background:var(--primary-light);color:var(--primary)}
+.stat-icon.teal{background:rgba(3,201,215,.10);color:var(--info)}
+.stat-icon.green{background:rgba(0,200,83,.10);color:var(--success)}
+.stat-icon.amber{background:rgba(255,193,7,.12);color:var(--warning)}
+.stat-body b{font-size:20px;font-weight:600;line-height:1.15;display:block}
 .stat-body span{color:var(--muted);font-size:12px}
 .toolbar{display:flex;align-items:center;gap:10px;margin:0 0 14px;flex-wrap:wrap}
-.search-wrap{position:relative;flex:1;min-width:220px;max-width:430px}
-.search-wrap input{width:100%;padding-left:34px}
-.search-wrap .search-icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+.search-wrap{position:relative;flex:1;min-width:220px;max-width:420px}
+.search-wrap input{width:100%;padding-left:40px}
+.search-wrap .search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat;appearance:none;padding-right:30px}
 .dirty-badge{
-  font-size:12px;font-weight:700;color:var(--warn);border:1px solid rgba(217,119,6,.35);background:rgba(217,119,6,.1);
-  padding:5px 10px;border-radius:999px;opacity:0;transform:translateY(2px);transition:.18s;pointer-events:none;
+  font-size:12px;font-weight:500;color:var(--warning);background:rgba(255,193,7,.10);border:1px solid rgba(255,193,7,.35);
+  padding:4px 10px;border-radius:999px;opacity:0;transform:translateY(2px);transition:.18s;pointer-events:none;
 }
 .dirty-badge.show{opacity:1;transform:none}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(390px,1fr));gap:16px;align-items:start}
-@media (max-width:560px){.grid{grid-template-columns:1fr}.app{padding:14px 12px 50px}.brand .sub{display:none}}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:14px;align-items:start}
 .workflow-card{
-  border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);box-shadow:var(--shadow);
-  overflow:hidden;animation:rise .22s ease both;content-visibility:auto;contain-intrinsic-size:auto 220px;
+  border:1px solid var(--divider);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow);
+  overflow:hidden;animation:rise .18s ease both;transition:border-color .18s,box-shadow .18s;content-visibility:auto;contain-intrinsic-size:auto 230px;
 }
-.workflow-card:nth-child(2){animation-delay:.02s}.workflow-card:nth-child(3){animation-delay:.04s}
-@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-.wf-head{display:flex;gap:10px;align-items:flex-start;padding:15px 16px 11px}
+.workflow-card:hover{border-color:var(--border);box-shadow:var(--shadow-2)}
+@keyframes rise{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+.wf-head{display:flex;gap:10px;align-items:flex-start;padding:14px 16px 10px}
 .wf-title{min-width:0;flex:1}
-.wf-title h2{margin:0;font-size:16px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.wf-title .wf-id{color:var(--muted);font-family:ui-monospace,Consolas,monospace;font-size:12px;font-weight:500;word-break:break-all}
+.wf-title h2{margin:0;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.wf-title .wf-id{color:var(--muted);font-family:ui-monospace,Consolas,monospace;font-size:12px;font-weight:400;word-break:break-all}
 .wf-actions{display:flex;align-items:center;gap:2px;flex:0 0 auto}
 .badges{display:flex;gap:6px;flex-wrap:wrap;padding:0 16px 10px}
 .badge{
-  display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;
-  border:1px solid var(--line-strong);background:var(--panel-soft);color:var(--muted);
+  display:inline-flex;align-items:center;gap:5px;height:24px;font-size:11px;font-weight:500;padding:0 8px;border-radius:7px;
+  background:var(--surface-2);color:var(--muted);border:1px solid var(--divider);
 }
-.badge.overseas{color:#2563eb;border-color:rgba(37,99,235,.25);background:rgba(37,99,235,.08)}
-.badge.domestic{color:#0d9488;border-color:rgba(13,148,136,.25);background:rgba(13,148,136,.08)}
-.badge.llm{color:var(--accent-2);border-color:rgba(139,92,246,.3);background:rgba(139,92,246,.1)}
-.node-zone{border-top:1px solid var(--line);padding:12px 16px 16px}
+.badge.overseas{color:var(--primary);background:var(--primary-light);border-color:rgba(60,150,202,.25)}
+.badge.domestic{color:var(--secondary);background:rgba(47,134,189,.10);border-color:rgba(47,134,189,.25)}
+.badge.llm{color:var(--primary);background:var(--primary-light);border-color:rgba(60,150,202,.3)}
+.node-zone{border-top:1px solid var(--divider);padding:12px 16px 16px}
 .node-zone-head{display:flex;align-items:center;gap:8px;margin-bottom:9px;color:var(--muted);font-size:12px}
-.node-zone-head b{color:var(--text)}
+.node-zone-head b{color:var(--text);font-weight:600}
 .node-zone-head .spacer{flex:1}
 .node-list{display:flex;flex-direction:column;gap:7px;min-height:42px}
-.node-empty{
-  border:1px dashed var(--line-strong);border-radius:12px;padding:14px;text-align:center;color:var(--muted);font-size:12px;
-}
+.node-empty{border:1px dashed var(--border);border-radius:10px;padding:16px;text-align:center;color:var(--muted);font-size:12px}
 .node-row{
-  display:grid;grid-template-columns:14px auto minmax(0,1fr) auto auto;align-items:center;gap:9px;
-  border:1px solid var(--line);border-radius:13px;padding:9px 10px;background:var(--panel-soft);
+  display:grid;grid-template-columns:14px 34px minmax(0,1fr) auto auto;align-items:center;gap:9px;
+  border:1px solid var(--divider);border-radius:10px;padding:8px 9px;background:var(--surface-2);
   transition:border-color .14s,box-shadow .14s,transform .14s,opacity .14s;
 }
-.node-row:hover{border-color:var(--line-strong);box-shadow:var(--shadow)}
+.node-row:hover{border-color:var(--border);box-shadow:var(--shadow)}
 .node-row.dragging{opacity:.45;transform:scale(.99)}
-.node-row.drop-before{box-shadow:inset 0 3px 0 var(--accent);border-color:var(--accent)}
-.node-row.drop-after{box-shadow:inset 0 -3px 0 var(--accent);border-color:var(--accent)}
-.drag-handle{cursor:grab;color:var(--muted);font-size:13px;letter-spacing:-2px;user-select:none;padding:0 2px}
+.node-row.drop-before{box-shadow:inset 0 3px 0 var(--primary);border-color:var(--primary)}
+.node-row.drop-after{box-shadow:inset 0 -3px 0 var(--primary);border-color:var(--primary)}
+.drag-handle{cursor:grab;color:var(--muted);user-select:none;display:grid;place-items:center}
 .drag-handle:active{cursor:grabbing}
-.type-pill{
-  display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;
-  white-space:nowrap;border:1px solid;
+.type-tag{
+  display:inline-flex;align-items:center;justify-content:center;gap:5px;height:26px;padding:0 8px;border-radius:7px;
+  font-size:11px;font-weight:500;white-space:nowrap;border:1px solid;min-width:34px;
 }
-.type-prompt{color:#7c3aed;background:rgba(139,92,246,.1);border-color:rgba(139,92,246,.28)}
-.type-text{color:#2563eb;background:rgba(59,130,246,.1);border-color:rgba(59,130,246,.26)}
-.type-default{color:#64748b;background:rgba(100,116,139,.1);border-color:rgba(100,116,139,.26)}
-.type-image{color:#0d9488;background:rgba(20,184,166,.1);border-color:rgba(20,184,166,.26)}
-.type-audio{color:#d97706;background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.28)}
-.type-video{color:#db2777;background:rgba(236,72,153,.1);border-color:rgba(236,72,153,.26)}
+.type-prompt{color:#1565c0;background:rgba(21,101,192,.08);border-color:rgba(21,101,192,.22)}
+.type-text{color:#00838f;background:rgba(0,131,143,.08);border-color:rgba(0,131,143,.22)}
+.type-default{color:#546e7a;background:rgba(84,110,122,.08);border-color:rgba(84,110,122,.22)}
+.type-image{color:#2e7d32;background:rgba(46,125,50,.08);border-color:rgba(46,125,50,.22)}
+.type-audio{color:#ef6c00;background:rgba(239,108,0,.08);border-color:rgba(239,108,0,.22)}
+.type-video{color:#ad1457;background:rgba(173,20,87,.08);border-color:rgba(173,20,87,.22)}
 @media (prefers-color-scheme: dark){
-  .type-prompt{color:#c4b5fd;background:rgba(139,92,246,.16);border-color:rgba(139,92,246,.35)}
-  .type-text{color:#93c5fd;background:rgba(59,130,246,.16);border-color:rgba(59,130,246,.35)}
-  .type-default{color:#cbd5e1;background:rgba(148,163,184,.12);border-color:rgba(148,163,184,.28)}
-  .type-image{color:#5eead4;background:rgba(20,184,166,.14);border-color:rgba(20,184,166,.32)}
-  .type-audio{color:#fcd34d;background:rgba(245,158,11,.14);border-color:rgba(245,158,11,.32)}
-  .type-video{color:#f9a8d4;background:rgba(236,72,153,.14);border-color:rgba(236,72,153,.32)}
+  .type-prompt{color:#90caf9;background:rgba(144,202,249,.10);border-color:rgba(144,202,249,.25)}
+  .type-text{color:#80deea;background:rgba(128,222,234,.10);border-color:rgba(128,222,234,.25)}
+  .type-default{color:#b0bec5;background:rgba(176,190,197,.10);border-color:rgba(176,190,197,.25)}
+  .type-image{color:#a5d6a7;background:rgba(165,214,167,.10);border-color:rgba(165,214,167,.25)}
+  .type-audio{color:#ffcc80;background:rgba(255,204,128,.10);border-color:rgba(255,204,128,.25)}
+  .type-video{color:#f48fb1;background:rgba(244,143,177,.10);border-color:rgba(244,143,177,.25)}
 }
 .node-core{min-width:0}
-.node-key{display:flex;align-items:baseline;gap:4px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;font-weight:700}
+.node-key{display:flex;align-items:baseline;gap:5px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;font-weight:600}
 .node-key .sep{color:var(--muted);font-weight:400}
-.node-key .fname{color:var(--accent)}
+.node-key .fname{color:var(--primary)}
 .node-value{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px}
 .node-label{font-size:12px;color:var(--muted);max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .node-actions{display:flex;align-items:center;gap:1px}
-.empty{
-  border:1px dashed var(--line-strong);border-radius:20px;padding:70px 20px;text-align:center;color:var(--muted);background:rgba(255,255,255,.35);
-}
-@media (prefers-color-scheme: dark){.empty{background:rgba(21,25,35,.35)}}
-.empty .big{font-size:40px;margin-bottom:10px}
-.empty h3{margin:0 0 6px;color:var(--text);font-size:17px}
-dialog{
-  border:0;padding:0;border-radius:20px;background:var(--panel);color:var(--text);box-shadow:var(--shadow-lg);
-  width:min(560px,calc(100vw - 28px));max-height:min(86vh,820px);
-}
-dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
+.empty{border:1px dashed var(--border);border-radius:var(--radius);padding:64px 20px;text-align:center;color:var(--muted);background:var(--surface)}
+.empty .big{color:var(--primary);margin-bottom:12px}
+.empty h3{margin:0 0 6px;color:var(--text);font-size:16px;font-weight:600}
+.empty code{background:var(--surface-2);border:1px solid var(--divider);padding:1px 6px;border-radius:6px}
+dialog{border:0;padding:0;border-radius:var(--radius);background:var(--surface);color:var(--text);box-shadow:0 24px 48px rgba(0,0,0,.24);width:min(560px,calc(100vw - 28px));max-height:min(86vh,820px)}
+dialog::backdrop{background:var(--overlay)}
 .dialog{display:flex;flex-direction:column;max-height:min(86vh,820px)}
-.dialog-head{display:flex;align-items:center;gap:10px;padding:18px 20px 12px}
-.dialog-head h3{margin:0;font-size:16px}
+.dialog-head{display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--divider)}
+.dialog-head h3{margin:0;font-size:15px;font-weight:600}
 .dialog-head .close-x{margin-left:auto}
-.dialog-body{padding:4px 20px 20px;overflow:auto}
-.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.dialog-body{padding:16px 20px 20px;overflow:auto}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .field.full{grid-column:1/-1}
-.field label{font-size:12.5px;font-weight:700;color:var(--muted)}
+.field label{font-size:12px;font-weight:500;color:var(--muted)}
 .field .hint{font-size:11.5px;color:var(--muted)}
-.field .hint.warn{color:var(--warn)}
-.check-row{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel-soft)}
-.check-row input{width:auto;accent-color:var(--accent)}
-.dialog-foot{display:flex;justify-content:flex-end;gap:9px;padding:14px 20px;border-top:1px solid var(--line)}
-.analyze-box{border:1px solid var(--line);border-radius:13px;padding:12px;background:var(--panel-soft);min-height:86px}
+.field .hint.warn{color:var(--warning)}
+.check-row{display:flex;align-items:center;gap:9px;padding:10px 12px;border:1px solid var(--divider);border-radius:10px;background:var(--surface);min-height:42px}
+.check-row:hover{border-color:var(--primary)}
+.check-row input{width:18px;height:18px;min-height:0;accent-color:var(--primary)}
+.dialog-foot{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:14px 20px;border-top:1px solid var(--divider)}
+.analyze-box{border:1px solid var(--divider);border-radius:10px;padding:12px;background:var(--surface-2);min-height:86px}
 .analyze-box .node-chip{
-  display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0;padding:5px 9px;border-radius:9px;
-  border:1px solid var(--line-strong);background:var(--panel);font-size:12px;
+  display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0;padding:4px 9px;border-radius:7px;
+  border:1px solid var(--divider);background:var(--surface);font-size:12px;
 }
 .analyze-box .muted{color:var(--muted);font-size:12px}
-#toasts{position:fixed;right:18px;bottom:18px;z-index:80;display:flex;flex-direction:column;gap:9px;pointer-events:none}
+#toasts{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:80;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none;width:min(560px,calc(100vw - 32px))}
 .toast{
-  min-width:220px;max-width:360px;padding:11px 14px;border-radius:13px;background:var(--panel);border:1px solid var(--line-strong);
-  box-shadow:var(--shadow-lg);font-size:13px;font-weight:600;display:flex;gap:8px;align-items:flex-start;animation:toast-in .2s ease both;
+  min-width:260px;max-width:100%;padding:10px 16px;border-radius:10px;background:var(--surface);color:var(--text);
+  border:1px solid var(--divider);box-shadow:0 8px 24px rgba(0,0,0,.22);font-size:13px;display:flex;gap:9px;align-items:center;
+  animation:toast-in .18s ease both;
 }
-.toast.ok{border-color:rgba(14,163,110,.35)}.toast.err{border-color:rgba(229,72,77,.4)}.toast.warn{border-color:rgba(217,119,6,.4)}
-@keyframes toast-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+.toast::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--primary);flex:0 0 auto}
+.toast.ok::before{background:var(--success)}.toast.err::before{background:var(--error)}.toast.warn::before{background:var(--warning)}
+@keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .toast.out{opacity:0;transform:translateY(6px);transition:.18s}
-@media (max-width:560px){
-  .node-row{grid-template-columns:12px auto minmax(0,1fr) auto}
-  .node-label{display:none}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:5px;border:2px solid var(--bg)}
+@media (max-width:640px){
   .stat-grid{grid-template-columns:repeat(2,1fr)}
-  dialog{width:calc(100vw - 20px)}
+  .grid{grid-template-columns:1fr}
+  .app{padding:12px 12px 64px}
+  .brand .sub{display:none}
+  .topbar{height:56px;margin-bottom:14px}
+  .node-row{grid-template-columns:12px 32px minmax(0,1fr) auto;grid-template-areas:"drag tag core actions"}
+  .drag-handle{grid-area:drag}.type-tag{grid-area:tag}.node-core{grid-area:core}.node-actions{grid-area:actions}
+  .node-label{display:none}
   .form-grid{grid-template-columns:1fr}
+  dialog{width:calc(100vw - 20px)}
 }
 </style>
 </head>
@@ -214,29 +221,29 @@ dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
 <div class="app">
   <header class="topbar">
     <div class="brand">
-      <div class="logo-mark">✦</div>
+      <div class="logo-mark"><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="sitemap"/></svg></div>
       <div>
         <h1>工作流输入节点</h1>
         <p class="sub" id="pluginMeta">runninghub_workflow_adapter</p>
       </div>
     </div>
     <div class="actions">
-      <button class="btn ghost" id="refreshBtn" title="重新读取配置">↻ 刷新</button>
-      <button class="btn" id="addWorkflowBtn">＋ 新建工作流</button>
-      <button class="btn primary" id="saveBtn" disabled>保存配置</button>
+      <button class="btn text" id="refreshBtn" title="重新读取配置"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="refresh"/></svg>刷新</button>
+      <button class="btn primary" id="addWorkflowBtn"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="plus"/></svg>新建工作流</button>
+      <button class="btn outlined" id="saveBtn" disabled><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="content-save"/></svg>保存配置</button>
     </div>
   </header>
 
   <section class="stat-grid" id="statGrid">
-    <div class="stat-card"><div class="stat-icon blue">🧭</div><div class="stat-body"><b id="statWorkflows">0</b><span>工作流</span></div></div>
-    <div class="stat-card"><div class="stat-icon purple">🧩</div><div class="stat-body"><b id="statNodes">0</b><span>输入节点</span></div></div>
-    <div class="stat-card"><div class="stat-icon green">✎</div><div class="stat-body"><b id="statPrompts">0</b><span>主提示词</span></div></div>
-    <div class="stat-card"><div class="stat-icon amber">📎</div><div class="stat-body"><b id="statFiles">0</b><span>图片 / 语音 / 视频</span></div></div>
+    <div class="stat-card"><div class="stat-icon blue"><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="sitemap"/></svg></div><div class="stat-body"><b id="statWorkflows">0</b><span>工作流</span></div></div>
+    <div class="stat-card"><div class="stat-icon teal"><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="tune-variant"/></svg></div><div class="stat-body"><b id="statNodes">0</b><span>输入节点</span></div></div>
+    <div class="stat-card"><div class="stat-icon green"><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="text-box-edit-outline"/></svg></div><div class="stat-body"><b id="statPrompts">0</b><span>主提示词</span></div></div>
+    <div class="stat-card"><div class="stat-icon amber"><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="paperclip"/></svg></div><div class="stat-body"><b id="statFiles">0</b><span>图片 / 语音 / 视频</span></div></div>
   </section>
 
   <div class="toolbar">
     <div class="search-wrap">
-      <span class="search-icon">⌕</span>
+      <span class="search-icon"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="magnify"/></svg></span>
       <input id="searchInput" type="search" placeholder="搜索工作流名称、ID 或节点字段…" autocomplete="off">
     </div>
     <select id="regionFilter" aria-label="按区域筛选">
@@ -249,7 +256,7 @@ dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
 
   <main class="grid" id="workflowGrid"></main>
   <div class="empty hidden" id="emptyState">
-    <div class="big">🎛️</div>
+    <div class="big"><svg class="icon" width="44" height="44" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="sitemap"/></svg></div>
     <h3>还没有工作流</h3>
     <p>点击右上角「新建工作流」，或回到聊天窗口发送 <code>/wf国外工作流 工作流ID 名称</code> 自动识别。</p>
   </div>
@@ -257,7 +264,7 @@ dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
 
 <dialog id="workflowDialog">
   <div class="dialog">
-    <div class="dialog-head"><h3 id="workflowDialogTitle">新建工作流</h3><button class="icon-btn close-x" data-close="workflowDialog">✕</button></div>
+    <div class="dialog-head"><h3 id="workflowDialogTitle">新建工作流</h3><button class="icon-btn close-x" data-close="workflowDialog"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="close"/></svg></button></div>
     <div class="dialog-body">
       <div class="form-grid">
         <div class="field full"><label for="wfName">工作流名称 *</label><input id="wfName" maxlength="64" placeholder="例如：动漫生图"></div>
@@ -273,15 +280,15 @@ dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
       </div>
     </div>
     <div class="dialog-foot">
-      <button class="btn ghost" data-close="workflowDialog">取消</button>
-      <button class="btn primary" id="workflowSaveBtn">保存工作流</button>
+      <button class="btn text" data-close="workflowDialog">取消</button>
+      <button class="btn primary" id="workflowSaveBtn"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="content-save"/></svg>保存工作流</button>
     </div>
   </div>
 </dialog>
 
 <dialog id="nodeDialog">
   <div class="dialog">
-    <div class="dialog-head"><h3 id="nodeDialogTitle">添加输入节点</h3><button class="icon-btn close-x" data-close="nodeDialog">✕</button></div>
+    <div class="dialog-head"><h3 id="nodeDialogTitle">添加输入节点</h3><button class="icon-btn close-x" data-close="nodeDialog"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="close"/></svg></button></div>
     <div class="dialog-body">
       <div class="form-grid">
         <div class="field full"><label for="nodeWorkflow">所属工作流</label><select id="nodeWorkflow"></select></div>
@@ -304,15 +311,15 @@ dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
       </div>
     </div>
     <div class="dialog-foot">
-      <button class="btn ghost" data-close="nodeDialog">取消</button>
-      <button class="btn primary" id="nodeSaveBtn">保存节点</button>
+      <button class="btn text" data-close="nodeDialog">取消</button>
+      <button class="btn primary" id="nodeSaveBtn"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="content-save"/></svg>保存节点</button>
     </div>
   </div>
 </dialog>
 
 <dialog id="analyzeDialog">
   <div class="dialog">
-    <div class="dialog-head"><h3>智能识别节点</h3><button class="icon-btn close-x" data-close="analyzeDialog">✕</button></div>
+    <div class="dialog-head"><h3>智能识别节点</h3><button class="icon-btn close-x" data-close="analyzeDialog"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="close"/></svg></button></div>
     <div class="dialog-body">
       <div class="form-grid">
         <div class="field full"><label>目标工作流</label><div class="hint" id="azWorkflowName" style="font-size:13px"></div></div>
@@ -324,9 +331,9 @@ dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
       </div>
     </div>
     <div class="dialog-foot" style="flex-wrap:wrap">
-      <button class="btn" id="azMergeBtn" hidden>＋ 仅添加缺失节点</button>
-      <button class="btn primary" id="azReplaceBtn" hidden>⇄ 替换当前全部节点</button>
-      <button class="btn primary" id="azRunBtn">✨ 开始识别</button>
+      <button class="btn outlined" id="azMergeBtn" hidden><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="plus"/></svg>仅添加缺失节点</button>
+      <button class="btn primary" id="azReplaceBtn" hidden><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="refresh"/></svg>替换当前全部节点</button>
+      <button class="btn primary" id="azRunBtn"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="auto-fix"/></svg>开始识别</button>
     </div>
   </div>
 </dialog>
@@ -336,8 +343,8 @@ dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
     <div class="dialog-head"><h3 id="confirmTitle">确认操作</h3></div>
     <div class="dialog-body"><p id="confirmText" style="color:var(--muted);margin:0"></p></div>
     <div class="dialog-foot">
-      <button class="btn ghost" id="confirmCancelBtn">取消</button>
-      <button class="btn danger" id="confirmOkBtn">确认</button>
+      <button class="btn text" id="confirmCancelBtn">取消</button>
+      <button class="btn danger-text" id="confirmOkBtn">确认</button>
     </div>
   </div>
 </dialog>
@@ -347,14 +354,37 @@ dialog::backdrop{background:rgba(8,10,16,.5);backdrop-filter:blur(3px)}
 <script type="module">
 const bridge = window.AstrBotPluginPage;
 
+const ICONS = {
+  sitemap: "M9,2V8H11V11H5C3.89,11 3,11.89 3,13V16H1V22H7V16H5V13H11V16H9V22H15V16H13V13H19V16H17V22H23V16H21V13C21,11.89 20.11,11 19,11H13V8H15V2H9Z",
+  refresh: "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z",
+  plus: "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z",
+  save: "M15,9H5V5H15M12,19A3,3 0 0,1 9,16A3,3 0 0,1 12,13A3,3 0 0,1 15,16A3,3 0 0,1 12,19M17,3H5C3.89,3 3,3.9 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V7L17,3Z",
+  pencil: "M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z",
+  delete: "M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19M8,9H16V19H8V9M15.5,4L14.5,3H9.5L8.5,4H5V6H19V4H15.5Z",
+  close: "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z",
+  up: "M13,20H11V8L5.5,13.5L4.08,12.08L12,4.16L19.92,12.08L18.5,13.5L13,8V20Z",
+  drag: "M9,3H11V5H9V3M13,3H15V5H13V3M9,7H11V9H9V7M13,7H15V9H13V7M9,11H11V13H9V11M13,11H15V13H13V11M9,15H11V17H9V15M13,15H15V17H13V15M9,19H11V21H9V19M13,19H15V21H13V19Z",
+  prompt: "M10 21H5C3.89 21 3 20.11 3 19V5C3 3.89 3.89 3 5 3H19C20.11 3 21 3.89 21 5V10.33C20.7 10.21 20.37 10.14 20.04 10.14C19.67 10.14 19.32 10.22 19 10.37V5H5V19H10.11L10 19.11V21M7 9H17V7H7V9M7 17H12.11L14 15.12V15H7V17M7 13H16.12L17 12.12V11H7V13M21.7 13.58L20.42 12.3C20.21 12.09 19.86 12.09 19.65 12.3L18.65 13.3L20.7 15.35L21.7 14.35C21.91 14.14 21.91 13.79 21.7 13.58M12 22H14.06L20.11 15.93L18.06 13.88L12 19.94V22Z",
+  tune: "M8 13C6.14 13 4.59 14.28 4.14 16H2V18H4.14C4.59 19.72 6.14 21 8 21S11.41 19.72 11.86 18H22V16H11.86C11.41 14.28 9.86 13 8 13M8 19C6.9 19 6 18.1 6 17C6 15.9 6.9 15 8 15S10 15.9 10 17C10 18.1 9.1 19 8 19M19.86 6C19.41 4.28 17.86 3 16 3S12.59 4.28 12.14 6H2V8H12.14C12.59 9.72 14.14 11 16 11S19.41 9.72 19.86 8H22V6H19.86M16 9C14.9 9 14 8.1 14 7C14 5.9 14.9 5 16 5S18 5.9 18 7C18 8.1 17.1 9 16 9Z",
+  image: "M19,19H5V5H19M19,3H5A2,2 0 0,0 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5A2,2 0 0,0 19,3M13.96,12.29L11.21,15.83L9.25,13.47L6.5,17H17.5L13.96,12.29Z",
+  audio: "M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2M19,11C19,14.53 16.39,17.44 13,17.93V21H11V17.93C7.61,17.44 5,14.53 5,11H7A5,5 0 0,0 12,16A5,5 0 0,0 17,11H19Z",
+  video: "M17,10.5V7A1,1 0 0,0 16,6H4A1,1 0 0,0 3,7V17A1,1 0 0,0 4,18H16A1,1 0 0,0 17,17V13.5L21,17.5V6.5L17,10.5Z",
+  lock: "M12,17C10.89,17 10,16.1 10,15C10,13.89 10.89,13 12,13A2,2 0 0,1 14,15A2,2 0 0,1 12,17M18,20V10H6V20H18M18,8A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V10C4,8.89 4.89,8 6,8H7V6A5,5 0 0,1 12,1A5,5 0 0,1 17,6V8H18M12,3A3,3 0 0,0 9,6V8H15V6A3,3 0 0,0 12,3Z",
+  auto: "M7.5,5.6L5,7L6.4,4.5L5,2L7.5,3.4L10,2L8.6,4.5L10,7L7.5,5.6M19.5,15.4L22,14L20.6,16.5L22,19L19.5,17.6L17,19L18.4,16.5L17,14L19.5,15.4M22,2L20.6,4.5L22,7L19.5,5.6L17,7L18.4,4.5L17,2L19.5,3.4L22,2M13.34,12.78L15.78,10.34L13.66,8.22L11.22,10.66L13.34,12.78M14.37,7.29L16.71,9.63C17.1,10 17.1,10.65 16.71,11.04L5.04,22.71C4.65,23.1 4,23.1 3.63,22.71L1.29,20.37C0.9,20 0.9,19.35 1.29,18.96L12.96,7.29C13.35,6.9 14,6.9 14.37,7.29Z"
+};
+function svgIcon(name, size = 18, extra = "") {
+  const path = ICONS[name] || ICONS.close;
+  return `<svg class="icon${extra ? " " + extra : ""}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${path}"/></svg>`;
+}
+
 const TYPE_META = {
-  prompt:  { label: "主提示词", icon: "✎", cls: "type-prompt",  hint: "接收 /wf运行 后的描述文本或 LLM 扩写结果，每个工作流最多 1 个" },
-  text:    { label: "可编辑配置", icon: "⚙", cls: "type-text",   hint: "先使用默认值；上传文件后会询问用户是否修改" },
-  default: { label: "固定默认值", icon: "▣", cls: "type-default", hint: "固定使用默认值，运行时不询问" },
-  image:   { label: "图片", icon: "🖼", cls: "type-image", hint: "无默认值时按顺序等待用户上传图片" },
-  audio:   { label: "语音", icon: "🎙", cls: "type-audio", hint: "无默认值时按顺序等待用户上传语音" },
-  video:   { label: "视频", icon: "🎬", cls: "type-video", hint: "无默认值时按顺序等待用户上传视频" },
-  "":      { label: "自动推断", icon: "✦", cls: "type-default", hint: "按字段名自动判断：image→图片、audio/voice→语音、video→视频，其余→文字" }
+  prompt:  { label: "主提示词", icon: "prompt", cls: "type-prompt",  hint: "接收 /wf运行 后的描述文本或 LLM 扩写结果，每个工作流最多 1 个" },
+  text:    { label: "可编辑配置", icon: "tune", cls: "type-text",   hint: "先使用默认值；上传文件后会询问用户是否修改" },
+  default: { label: "固定默认值", icon: "lock", cls: "type-default", hint: "固定使用默认值，运行时不询问" },
+  image:   { label: "图片", icon: "image", cls: "type-image", hint: "无默认值时按顺序等待用户上传图片" },
+  audio:   { label: "语音", icon: "audio", cls: "type-audio", hint: "无默认值时按顺序等待用户上传语音" },
+  video:   { label: "视频", icon: "video", cls: "type-video", hint: "无默认值时按顺序等待用户上传视频" },
+  "":      { label: "自动推断", icon: "auto", cls: "type-default", hint: "按字段名自动判断：image→图片、audio/voice→语音、video→视频，其余→文字" }
 };
 
 const state = { workflows: [], original: null, dirty: false, saving: false, loading: true, search: "", region: "all" };
@@ -466,18 +496,18 @@ function nodeRowHTML(wfIndex, nodeIndex) {
   const meta = typeMeta(t);
   return `
     <div class="node-row" draggable="true" data-wf="${wfIndex}" data-node="${nodeIndex}">
-      <span class="drag-handle" title="拖动排序">⠿</span>
-      <span class="type-pill ${meta.cls}">${meta.icon} ${esc(meta.label)}</span>
+      <span class="drag-handle" title="拖动排序">${svgIcon("drag", 14)}</span>
+      <span class="type-tag ${meta.cls}">${svgIcon(meta.icon, 14)}<span>${esc(meta.label)}</span></span>
       <div class="node-core">
         <div class="node-key"><span>${esc(node.node_id)}</span><span class="sep">·</span><span class="fname">${esc(node.field_name)}</span></div>
         <div class="node-value" title="${esc(node.field_value || "")}">${esc(valuePreview(node))}</div>
       </div>
       <div class="node-label" title="${esc(node.label || "")}">${esc(node.label || "未设置说明")}</div>
       <div class="node-actions">
-        <button class="icon-btn" data-act="move-node" data-wf="${wfIndex}" data-node="${nodeIndex}" data-dir="-1" title="上移">↑</button>
-        <button class="icon-btn" data-act="move-node" data-wf="${wfIndex}" data-node="${nodeIndex}" data-dir="1" title="下移">↓</button>
-        <button class="icon-btn" data-act="edit-node" data-wf="${wfIndex}" data-node="${nodeIndex}" title="编辑">✎</button>
-        <button class="icon-btn danger" data-act="del-node" data-wf="${wfIndex}" data-node="${nodeIndex}" title="删除">✕</button>
+        <button class="icon-btn small" data-act="move-node" data-wf="${wfIndex}" data-node="${nodeIndex}" data-dir="-1" title="上移">${svgIcon("up", 15)}</button>
+        <button class="icon-btn small" data-act="move-node" data-wf="${wfIndex}" data-node="${nodeIndex}" data-dir="1" title="下移">${svgIcon("up", 15, "rotate-180")}</button>
+        <button class="icon-btn small" data-act="edit-node" data-wf="${wfIndex}" data-node="${nodeIndex}" title="编辑">${svgIcon("pencil", 15)}</button>
+        <button class="icon-btn small danger" data-act="del-node" data-wf="${wfIndex}" data-node="${nodeIndex}" title="删除">${svgIcon("delete", 15)}</button>
       </div>
     </div>`;
 }
@@ -497,21 +527,21 @@ function workflowCardHTML({ wf, index, nodes }) {
           <span class="wf-id">${esc(wf.workflow_id)}</span>
         </div>
         <div class="wf-actions">
-          <button class="btn small" data-act="analyze" data-wf="${index}" title="拉取工作流并智能识别节点">✨ 识别</button>
-          <button class="btn small" data-act="add-node" data-wf="${index}">＋ 节点</button>
-          <button class="icon-btn" data-act="edit-wf" data-wf="${index}" title="编辑工作流">✎</button>
-          <button class="icon-btn danger" data-act="del-wf" data-wf="${index}" title="删除工作流">✕</button>
+          <button class="btn small" data-act="analyze" data-wf="${index}" title="拉取工作流并智能识别节点">${svgIcon("auto", 14)}识别</button>
+          <button class="btn small" data-act="add-node" data-wf="${index}">${svgIcon("plus", 14)}节点</button>
+          <button class="icon-btn small" data-act="edit-wf" data-wf="${index}" title="编辑工作流">${svgIcon("pencil", 15)}</button>
+          <button class="icon-btn small danger" data-act="del-wf" data-wf="${index}" title="删除工作流">${svgIcon("delete", 15)}</button>
         </div>
       </div>
       <div class="badges">
-        <span class="badge ${regionCls}">${wf.region === "domestic" ? "🇨🇳" : "🌍"} ${regionText} · runninghub.${wf.region === "domestic" ? "cn" : "ai"}</span>
+        <span class="badge ${regionCls}">${regionText} · runninghub.${wf.region === "domestic" ? "cn" : "ai"}</span>
         <span class="badge">⚡ ${esc(wf.instance_type)}</span>
         ${wf.llm_enhance ? '<span class="badge llm">✦ LLM 扩写</span>' : ""}
-        <span class="badge">🧩 ${wf.nodes.length} 个节点</span>
+        <span class="badge">${svgIcon("tune", 12)} ${wf.nodes.length} 个节点</span>
       </div>
       <div class="node-zone">
         <div class="node-zone-head"><b>输入节点</b><span>拖动左侧把手调整顺序</span><span class="spacer"></span>${nodes.length !== wf.nodes.length ? `<span>已筛选 ${nodes.length}/${wf.nodes.length}</span>` : ""}</div>
-        <div class="node-list">${rows || '<div class="node-empty">还没有输入节点，点击「＋ 节点」添加</div>'}</div>
+        <div class="node-list">${rows || '<div class="node-empty">还没有输入节点，点击右上角「添加节点」</div>'}</div>
       </div>
     </article>`;
 }
@@ -704,7 +734,7 @@ async function runAnalyze() {
     toast(String(err?.message || err), "err", 5000);
   } finally {
     btn.disabled = false;
-    btn.textContent = "✨ 开始识别";
+    btn.textContent = "开始识别";
   }
 }
 
@@ -737,7 +767,7 @@ function openAnalyzeDialog(wfIndex) {
   $("azReplaceBtn").hidden = true;
   $("azMergeBtn").hidden = true;
   $("azRunBtn").disabled = false;
-  $("azRunBtn").textContent = "✨ 开始识别";
+  $("azRunBtn").textContent = "开始识别";
   $("analyzeDialog").showModal();
 }
 
