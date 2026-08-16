@@ -1,137 +1,177 @@
-# 麦麦画师 · RunningHub（AstrBot 版）
+# 麦麦画师 · RunningHub
 
-从 maibot 插件 [runninghub-workflow-adapter](https://github.com/achenjins/runninghub-workflow-adapter) 迁移到
-AstrBot 的通用工作流适配插件。让机器人调用 RunningHub 工作流完成文生图、多参考图生成、视频生成，
-并把成品自动发回聊天。
+让机器人调用 RunningHub 工作流帮你出图、出视频：一句话文生图、多参考图 / 视频生成，结果自动发回聊天。
 
-## 平台支持
+- 平台入口：[RunningHub 国外](https://www.runninghub.ai?inviteCode=bvhsaqdr) / [RunningHub 国内](https://www.runninghub.cn?inviteCode=8cq8uhl8)
 
-- **首选通道**：AstrBot 通用发送通道（`context.send_message`），理论上支持 AstrBot 已接入的所有平台。
-- **撤回能力**：AstrBot 没有统一的消息撤回 API；本插件通过 AstrBot aiocqhttp 适配器暴露的
-  OneBot v11 客户端直接调用 `delete_msg` 实现撤回。因此自动撤回仅在 NapCat / OneBot v11 QQ 平台生效。
-- 图片/视频直发也遵循同样策略：**默认走 AstrBot 通用通道**；仅当开启自动撤回、需要拿到
-  `message_id` 时，才临时使用 OneBot 直发，失败自动回退通用通道。
+> [!WARNING]
+> RunningHub 是付费平台，每次运行都会消耗余额 / 积分。建议装好后先配置「访问控制」。
 
-## 功能
+> [!NOTE]
+> 发送兼容 AstrBot 已接入的平台；自动撤回依赖 OneBot v11（NapCat / QQ），其他平台会自动跳过撤回。
 
-- 多工作流配置：名称、工作流 ID、设备类型（Standard / Plus / Ultra）、区域（overseas / domestic）
-- 输入节点类型：`prompt` / `text` / `default` / `image` / `audio` / `video`，留空自动推断
-- 交互式收集：图片 / 语音 / 视频按顺序上传，支持「跳过剩余」；`text` 配置节点上传后询问确认
-- LLM 提示词扩写：支持自定义模板文件
-- LLM 节点识别：`/识别国外工作流`、`/识别国内工作流`、`/详细识别*`，LLM 失败自动回退启发式
-- 访问控制：用户 / 群白名单、每用户每小时限频、管理员中断
-- 自动撤回（仅 OneBot v11）：可在配置中开启并设置延迟秒数
+---
 
-## 命令
+## 能做什么
 
-| 命令 | 说明 |
-| --- | --- |
-| `/rh运行 <工作流名> [描述文本]` | 运行工作流 |
-| `/工作流` | 列出已配置工作流 |
-| `/识别国外工作流 <工作流ID> [名称]` | 识别 runninghub.ai 工作流关键节点 |
-| `/识别国内工作流 <工作流ID> [名称]` | 识别 runninghub.cn 工作流关键节点 |
-| `/详细识别国外工作流 <工作流ID> [名称]` | LLM 详细识别全部输入/配置节点 |
-| `/详细识别国内工作流 <工作流ID> [名称]` | LLM 详细识别全部输入/配置节点 |
-| `/rh中断` | 中断输入会话或按编号取消运行中的任务 |
+- 文生图 / 图生图 / 文生视频 / 多参考生视频，可配置多个工作流
+- 图片 / 语音 / 视频参考文件交互式上传，可只传部分或「跳过剩余」
+- 可编辑参数（分辨率、步数、CFG 等）运行前询问确认
+- 可选 LLM 提示词扩写，一句话也能出高质量图
+- 命令触发 + 自然语言触发
+- 用户 / 群白名单、每用户每小时限频、管理员中断
+- 结果自动发送，可选发后自动撤回
 
-## LLM 工具
-
-插件注册了 `run_workflow` 工具。**仅包含一个提示词节点、没有图片/音频/视频/配置输入的工作流**
-支持自然语言调用；可用工作流名称会动态注入工具描述。
-
-## Web API
-
-插件启动时注册：
-
-```
-POST /api/plug/runninghub-workflow-adapter/run_workflow_api
-Content-Type: application/json
-
-{
-  "workflow_name": "动漫生图",
-  "prompt": "一只猫",
-  "stream_id": "",       // AstrBot unified_msg_origin，主动发送结果时必填
-  "user_id": "",
-  "group_id": "",
-  "platform_id": ""
-}
-```
-
-## 配置
-
-AstrBot 插件配置在 WebUI 中可视化编辑，Schema 位于 `_conf_schema.json`。
-
-### maibot → AstrBot 配置映射
-
-| maibot `config.toml` | AstrBot 配置项 | 说明 |
-| --- | --- | --- |
-| `[server] base_url / api_key / base_url_cn / api_key_cn` | `server.*` | 原样对应 |
-| `[generation] poll_interval / max_wait / max_concurrent / download_timeout` | `generation.*` | 原样对应 |
-| `[feature] enable / recall_seconds` | `feature.enable / recall_seconds` | 原样对应 |
-| `[feature] use_llm` | `feature.use_llm` | 原样对应 |
-| `[feature] model / enhance_model` | `feature.model / enhance_model` | MaiBot 模型槽位名改为 AstrBot 模型提供商 ID，留空使用默认/当前会话模型 |
-| `[access] allow_users / allow_groups / max_per_user_per_hour / admin_users` | `access.*` | 原样对应 |
-| `[[workflows.items]] ...` | `workflows`（template_list） | 工作流列表；`input_nodes` 在 WebUI 中为 JSON 文本，推荐用 `/识别*` 命令自动生成 |
-
-> 迁移说明：MaiBot 的 `config.toml` 不会自动导入 AstrBot。你可以按 README 中的映射在 WebUI
-> 中填写，或使用 `/识别*` 命令重新生成工作流节点。
-
-## 代码结构
-
-```
-astrobt-runninghub/
-├── main.py                        # AstrBot Star 插件入口：命令 / 工具 / Web API / 业务编排
-├── metadata.yaml                  # 插件元数据
-├── _conf_schema.json              # WebUI 配置 Schema
-├── requirements.txt
-├── tests/
-│   └── test_plugin.py             # 配置 / 命令 / 投递通道测试
-└── rh_generic_lib/
-    ├── config.py                  # 配置模型 + AstrBot 配置归一化 / 序列化
-    ├── delivery.py                # 消息投递与撤回通道抽象（通用通道 / OneBot 通道）
-    ├── legacy_config.py           # 旧 config.toml 自动迁移
-    ├── runninghub_client.py       # RunningHub OpenAPI 客户端（纯业务，无框架依赖）
-    └── workflow_detect.py         # 工作流节点识别 / LLM 输出解析（无框架依赖纯函数）
-├── tools/
-│   └── convert_config.py          # config.toml → AstrBot JSON 独立转换工具
-```
-
-### 发送与撤回如何解耦
-
-`delivery.py` 定义 `DeliveryTarget`（消息目标）和通道抽象：
-
-- `GenericAstrBotChannel`：AstrBot 通用通道，**所有平台的首选发送方式**。
-- `OneBotChannel`：OneBot v11 直发并返回 `message_id`，提供 `delete_msg` 撤回。
-- `Delivery` 门面统一选择通道：
-  - 发文本：AstrBot 通用通道优先。
-  - 发图片/视频：默认 AstrBot 通用通道；`need_message_id=True` 时先 OneBot 直发，失败回退通用通道。
-  - 撤回：仅 OneBot 通道。
-
-后续想支持其他有撤回能力的平台，只需新增一个 Channel 实现并在 `Delivery.channel_for()` 中注册判断，
-不需要改 `main.py` 的业务逻辑。
-
-## 与 maibot 原版的差异
-
-1. **消息发送**：优先 AstrBot 通用通道，不再是 NapCat API 命名空间硬编码直发。
-2. **自动撤回**：maibot 无撤回接口，原版靠 `_ACTION_API_CANDIDATES` 猜 API 并直发拿 message_id；
-   AstrBot 版收敛到 `delivery.py`，用 OneBot `delete_msg` 实现。
-3. **LLM 上下文 / 主动回复**：AstrBot 没有 `maisaka.context.append` / `maisaka.proactive.trigger`。
-   迁移版不再追加内部记忆；命令路径完成后由插件直接发送一句「生成完成」确认
-   （可关闭 `feature.result_notice`），LLM 工具路径由 AstrBot Agent 自然续写回复。
-4. **配置**：`config.toml` → AstrBot `_conf_schema.json`；模型槽位名改为模型提供商 ID。
-5. **插件间 API**：MaiBot 的 `@API("run_workflow_api")` 改为 AstrBot Web API
-   `POST /api/plug/runninghub-workflow-adapter/run_workflow_api`。
+---
 
 ## 安装
 
-1. 把整个 `astrobt-runninghub` 目录复制到 AstrBot 的 `data/plugins/` 下。
-2. AstrBot 会自动安装 `requirements.txt` 依赖。
-3. 在 WebUI 插件管理中启用插件，进入配置页填写 RunningHub API Key。
-4. 使用 `/识别国外工作流 <工作流ID> <名称>` 自动识别节点，或手动添加工作流。
-5. `/rh运行 <名称> 一只猫` 开始生图。
+```bash
+cd <AstrBot目录>/data/plugins
+git clone https://github.com/achenjins/astrbot_plugin_runninghub_maimai.git astrobt-runninghub
+cd astrobt-runninghub
+pip install -r requirements.txt
+```
 
-## 致谢
+装好后在 AstrBot WebUI 的插件管理里启用 / 重载插件。
 
-本项目从 [Mai-with-u](https://github.com/Mai-with-u) / maibot 生态插件
-[runninghub-workflow-adapter](https://github.com/achenjins/runninghub-workflow-adapter) 迁移，
-保留 MIT 许可。
+---
+
+## 三步跑通第一张图
+
+### 1. 注册并填写 API Key
+
+1. 打开 [国内站](https://www.runninghub.cn?inviteCode=8cq8uhl8) 或 [海外站](https://www.runninghub.ai?inviteCode=bvhsaqdr) 注册。
+2. 在对应平台的 API 页面复制 API Key。
+3. 打开 AstrBot 插件配置页，填入「国内 API Key」或「国外 API Key」。
+
+> [!TIP]
+> 国内 / 国外账号和 Key 不通用，工作流在哪个站就填哪个 Key。
+
+### 2. 识别一个工作流
+
+在聊天里发：
+
+```
+/识别国外工作流 2087492768787685378 文生图
+```
+
+或：
+
+```
+/识别国内工作流 <工作流ID> <名称>
+```
+
+看到「识别成功」后，去插件配置页的工作流列表里检查输入节点，按需删除多余节点。
+
+### 3. 跑一张图
+
+```
+/rh运行 文生图 原神刻晴
+```
+
+如果工作流需要参考图 / 音频 / 视频，机器人会引导你上传；不想传就回「跳过剩余」。完成后结果会自动发回聊天。
+
+---
+
+## 常用命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `/rh运行 <工作流名> [描述]` | 运行工作流 |
+| `/rh中断` | 中断输入会话或按编号取消任务 |
+| `/工作流` | 列出已配置工作流 |
+| `/识别国外工作流 <ID> [名称]` | 识别 runninghub.ai 工作流关键节点 |
+| `/识别国内工作流 <ID> [名称]` | 识别 runninghub.cn 工作流关键节点 |
+| `/详细识别国外工作流 <ID> [名称]` | LLM 详细识别全部参数 |
+| `/详细识别国内工作流 <ID> [名称]` | LLM 详细识别全部参数 |
+
+---
+
+## 自然语言触发
+
+工作流只有一个「提示词（prompt）」输入节点时，不用敲命令，直接说：
+
+```
+帮我画一只甘雨，蓝色长发，全身立绘
+```
+
+机器人会自动调用工作流并把结果发回。新增 / 改名工作流后，重载插件刷新可用列表。
+
+---
+
+## 配置项速查
+
+### RunningHub 服务
+
+| 配置项 | 说明 |
+| --- | --- |
+| `api_key` | 国外 API Key |
+| `api_key_cn` | 国内 API Key |
+
+### 生成参数
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `poll_interval` | 15 | 任务轮询间隔（秒） |
+| `max_wait` | 1800 | 任务最大等待时间（秒） |
+| `max_concurrent` | 2 | 同时进行任务数上限 |
+| `download_timeout` | 120 | 下载结果超时（秒） |
+
+### 功能设置
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enable` | false | 自动撤回开关 |
+| `recall_seconds` | 90 | 发送后多少秒撤回，0 表示不撤回 |
+| `result_notice` | true | 完成后是否追加「生成完成」消息 |
+| `use_llm` | true | 使用 LLM 识别节点，失败自动回退规则 |
+| `model` / `enhance_model` | 空 | 识别 / 扩写使用的模型提供商，留空用默认模型 |
+
+### 访问控制
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `allow_users` | [] | 用户 ID 白名单，留空不限 |
+| `allow_groups` | [] | 群号白名单，留空不限群 |
+| `max_per_user_per_hour` | 0 | 每用户每小时上限，0 不限 |
+| `admin_users` | [] | 管理员 ID，可中断所有人任务 |
+
+> [!WARNING]
+> 默认全部放行，任何人都能触发任务。建议至少配置白名单或限频。
+
+### 工作流列表
+
+| 配置项 | 说明 |
+| --- | --- |
+| `name` | 工作流名称，用于 /rh运行 |
+| `workflow_id` | RunningHub 工作流 ID |
+| `instance_type` | Standard / Plus / Ultra |
+| `region` | overseas=国外，domestic=国内 |
+| `llm_enhance` / `llm_template_path` | 提示词扩写开关与模板路径 |
+| `input_nodes` | 输入节点 JSON，推荐用 /识别* 命令自动生成 |
+
+---
+
+## FAQ
+
+**Q：识别报「对应 API Key 未填写」？**
+A：检查工作流区域和已填的 Key 是否对应：国内工作流填 `api_key_cn`，国外填 `api_key`。
+
+**Q：识别不出节点？**
+A：普通识别只认关键节点，改用 `/详细识别*`，或去配置页手动添加。
+
+**Q：上传文件后没反应？**
+A：确认插件已重载，并查看日志中是否有「已接收输入 / 任务已提交」。
+
+**Q：为什么自然语言没触发生成？**
+A：只有单个「提示词」节点的工作流支持自然语言；需要传文件或改参数时请用 `/rh运行`。
+
+**Q：自动撤回没生效？**
+A：自动撤回仅 NapCat / OneBot v11 平台可用；其他平台会自动跳过。
+
+---
+
+## 许可证
+
+MIT

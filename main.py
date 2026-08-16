@@ -18,7 +18,7 @@
 - /详细识别国外工作流 <工作流ID> [名称] / /详细识别国内工作流 <工作流ID> [名称]
 - /rh中断
 LLM 工具：run_workflow
-Web API：POST /api/plug/runninghub-workflow-adapter/run_workflow_api
+Web API：POST /api/plug/runninghub_workflow_adapter/run_workflow_api
 """
 
 from __future__ import annotations
@@ -354,7 +354,7 @@ class RunningHubGenericPlugin(Star):
 
         self._cleanup_task = asyncio.create_task(self._cleanup_cache_loop())
         self.context.register_web_api(
-            "/runninghub-workflow-adapter/run_workflow_api",
+            "/runninghub_workflow_adapter/run_workflow_api",
             self.handle_run_workflow_api,
             ["POST"],
             "运行配置好的 RunningHub 工作流（供其他插件 / WebUI 调用）",
