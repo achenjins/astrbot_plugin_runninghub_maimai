@@ -103,8 +103,9 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),
   padding:4px 10px;border-radius:999px;opacity:0;transform:translateY(2px);transition:.18s;pointer-events:none;
 }
 .dirty-badge.show{opacity:1;transform:none}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:14px;align-items:start}
+.grid{columns:3 400px;column-gap:14px}
 .workflow-card{
+  display:inline-block;width:100%;margin:0 0 14px;break-inside:avoid;page-break-inside:avoid;
   border:1px solid var(--divider);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow);
   overflow:hidden;animation:rise .18s ease both;transition:border-color .18s,box-shadow .18s;content-visibility:auto;contain-intrinsic-size:auto 230px;
 }
@@ -211,7 +212,7 @@ dialog::backdrop{background:var(--overlay)}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:5px;border:2px solid var(--bg)}
 @media (max-width:640px){
   .stat-grid{grid-template-columns:repeat(2,1fr)}
-  .grid{grid-template-columns:1fr}
+  .grid{columns:1;column-gap:0}
   .app{padding:12px 12px 64px}
   .brand .sub{display:none}
   .topbar{height:56px;margin-bottom:14px}
