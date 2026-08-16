@@ -1,7 +1,7 @@
 name: runninghub_workflow_adapter
 desc: 麦麦画师 · RunningHub：从一句话文生图，到多参考图 / 视频生成，统统自动完成并把成品发回聊天。支持自定义工作流、AI 扩写提示词与限流防刷，适配 NapCat / OneBot v11 QQ。
 author: 锦瑟
-version: 2.1.5
+version: 2.1.6
 repo: https://github.com/achenjins/astrbot_plugin_runninghub_maimai
 social_link: https://github.com/achenjins
 display_name: 麦麦画师 · RunningHub
