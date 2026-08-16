@@ -406,6 +406,14 @@ function esc(value) {
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
   ));
 }
+function normalizeApiResponse(raw) {
+  // AstrBot 页面桥会把后端 { success, data } 的 data 剥掉再传给 iframe，
+  // 这里统一归一化成业务数据，兼容桥已拆包和未拆包两种行为。
+  if (!raw || typeof raw !== "object") return raw;
+  if (raw.success === false) return raw;
+  if (raw.data && typeof raw.data === "object") return raw.data;
+  return raw;
+}
 function toast(message, type = "info", duration = 3200) {
   const el = document.createElement("div");
   el.className = `toast ${type === "ok" ? "ok" : type === "err" ? "err" : type === "warn" ? "warn" : ""}`;
@@ -602,9 +610,9 @@ function updateTemplateHint() {
 
 async function loadTemplates() {
   try {
-    const res = await bridge.apiGet("page/prompt-templates");
-    if (res && res.success !== false && res.data) {
-      const list = Array.isArray(res.data.templates) ? clone(res.data.templates) : [];
+    const res = normalizeApiResponse(await bridge.apiGet("page/prompt-templates"));
+    if (res && res.success !== false) {
+      const list = Array.isArray(res.templates) ? clone(res.templates) : [];
       if (list.length) state.templates = list;
     }
   } catch (err) {
@@ -633,9 +641,10 @@ async function uploadTemplate(file) {
         content,
       });
     }
+    res = normalizeApiResponse(res);
     if (!res || res.success === false) throw new Error(res?.message || "上传失败");
     await loadTemplates();
-    const path = res.data?.path || "";
+    const path = res.path || res.data?.path || "";
     populateTemplateSelect(path || `prompt/${file.name}`);
     toast(res.message || "模板已上传", "ok");
   } catch (err) {
@@ -650,10 +659,12 @@ async function previewSelectedTemplate() {
     return;
   }
   try {
-    const res = await bridge.apiGet("page/prompt-template", { name: path });
+    const res = normalizeApiResponse(await bridge.apiGet("page/prompt-template", { name: path }));
     if (!res || res.success === false) throw new Error(res?.message || "读取模板失败");
+    const content = res.content || res.data?.content || "";
+    if (!content) throw new Error("模板内容为空");
     $("templatePreviewTitle").textContent = path;
-    $("templatePreviewContent").value = res.data?.content || "";
+    $("templatePreviewContent").value = content;
     $("templatePreviewDialog").showModal();
   } catch (err) {
     toast(`预览失败：${err?.message || err}`, "err", 5200);
@@ -764,9 +775,9 @@ function askConfirm(title, text, okLabel = "确认") {
 async function loadConfig() {
   state.loading = true;
   render();
-  const res = await bridge.apiGet("page/config");
+  const res = normalizeApiResponse(await bridge.apiGet("page/config"));
   if (!res || res.success === false) throw new Error(res?.message || "读取配置失败");
-  const data = res.data || res;
+  const data = res;
   state.workflows = Array.isArray(data.workflows) ? clone(data.workflows) : [];
   if (Array.isArray(data.prompt_templates)) state.templates = clone(data.prompt_templates);
   state.original = clone(state.workflows);
@@ -782,7 +793,7 @@ async function saveConfig() {
   $("saveBtn").disabled = true;
   $("saveBtn").textContent = "保存中…";
   try {
-    const res = await bridge.apiPost("page/config", { workflows: state.workflows });
+    const res = normalizeApiResponse(await bridge.apiPost("page/config", { workflows: state.workflows }));
     if (!res || res.success === false) throw new Error(res?.message || "保存失败");
     state.original = clone(state.workflows);
     setDirty(false);
@@ -803,11 +814,11 @@ async function runAnalyze() {
   btn.disabled = true;
   btn.textContent = "识别中…";
   try {
-    const res = await bridge.apiPost("page/analyze", {
+    const res = normalizeApiResponse(await bridge.apiPost("page/analyze", {
       workflow_id: wf.workflow_id,
       region: $("azRegion").value,
       detailed: $("azDetailed").checked
-    });
+    }));
     if (!res || res.success === false) throw new Error(res?.message || "识别失败");
     analyzeState.nodes = (res.nodes || []).map(normalizeNode).filter((n) => n.node_id);
     analyzeState.method = res.method || "";
