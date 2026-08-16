@@ -606,6 +606,10 @@ def test_prompt_template_path_validation(
     target = star._safe_prompt_template("anima3_prompt_template.txt")
     assert target is not None
     assert target.name == "anima3_prompt_template.txt"
+    # 页面下拉传的是 prompt/xxx.txt 相对路径，也必须能解析
+    relative = star._safe_prompt_template("prompt/anima3_prompt_template.txt")
+    assert relative is not None
+    assert relative.name == "anima3_prompt_template.txt"
     assert star._safe_prompt_template("../metadata.yaml") is None
     assert star._safe_prompt_template("bad.exe") is None
     assert star._safe_prompt_template("") is None

@@ -2835,9 +2835,22 @@ class RunningHubGenericPlugin(Star):
         return directory
 
     def _safe_prompt_template(self, name: str) -> Path | None:
-        """把模板名解析为 prompt/ 目录内的安全路径（仅允许 .txt / .md）。"""
+        """把模板名解析为 prompt/ 目录内的安全路径（仅允许 .txt / .md）。
+
+        兼容两种写法：
+        - ``anima3_prompt_template.txt``（纯文件名）
+        - ``prompt/anima3_prompt_template.txt``（页面下拉里使用的相对路径）
+        """
         raw = str(name or "").strip().replace("\\", "/")
-        if not raw or raw in {".", ".."} or raw.startswith(".") or "/" in raw:
+        if raw.startswith("prompt/"):
+            raw = raw[len("prompt/"):]
+        if (
+            not raw
+            or raw in {".", ".."}
+            or raw.startswith((".", "/"))
+            or "/" in raw
+            or "\\" in raw
+        ):
             return None
         if not raw.lower().endswith((".txt", ".md")):
             return None
@@ -2847,6 +2860,7 @@ class RunningHubGenericPlugin(Star):
         except ValueError:
             return None
         return target
+
 
     def _list_prompt_templates(self) -> list[dict[str, Any]]:
         directory = self._prompt_templates_dir()
