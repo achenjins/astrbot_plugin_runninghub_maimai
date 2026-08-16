@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib
 import re
 import sys
 import time
@@ -42,31 +43,52 @@ from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
-if str(_PLUGIN_DIR) not in sys.path:
+_PLUGIN_PACKAGE = __package__ or ""
+
+# AstrBot 重载插件时只会清理 ``data.plugins.<插件目录>.*`` 命名空间，不会清理
+# 顶层 ``rh_generic_lib.*``。如果继续从顶层导入，升级后旧版配置模块会一直留在
+# sys.modules 里，导致识别结果写入后 ``workflow_nodes`` 为空。
+# 因此在 AstrBot 内运行时，统一从插件自身的包命名空间加载本地库，保证每次
+# 重载/升级都取到当前插件目录里的代码；本地直接运行 / pytest 时回退顶层导入。
+# 仅本地直跑时需要把插件目录放进 sys.path，AstrBot 下不污染其他插件的顶层导入。
+if not _PLUGIN_PACKAGE and str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
-# 包名必须全局唯一：多个 RunningHub 插件同进程加载时，通用名 lib 会互相抢占
-# sys.modules，导致拿到对方的旧版 client。不要在这里对子模块做部分 reload。
-from rh_generic_lib.config import (  # noqa: E402
-    GenericConfig,
-    InputNodeSection,
-    WorkflowItemSection,
-    build_config_model,
-    build_workflow_items,
-    dump_config_dict,
-    dump_workflow_items,
-)
-from rh_generic_lib.delivery import Delivery, DeliveryTarget  # noqa: E402
-from rh_generic_lib.legacy_config import parse_legacy_toml  # noqa: E402
-from rh_generic_lib.runninghub_client import RunningHubClient, RunningHubError  # noqa: E402
-from rh_generic_lib.workflow_detect import (  # noqa: E402
-    LLM_DETECT_KEY_PROMPT,
-    LLM_DETECT_PROMPT,
-    detect_input_nodes,
-    detect_key_nodes,
-    describe_workflow_for_llm,
-    parse_llm_nodes,
-)
+
+def _load_local_module(module_name: str):
+    """加载插件本地库模块（AstrBot 下使用插件包命名空间）。"""
+    if _PLUGIN_PACKAGE:
+        return importlib.import_module(f"{_PLUGIN_PACKAGE}.rh_generic_lib.{module_name}")
+    return importlib.import_module(f"rh_generic_lib.{module_name}")
+
+
+_config_lib = _load_local_module("config")
+GenericConfig = _config_lib.GenericConfig
+InputNodeSection = _config_lib.InputNodeSection
+WorkflowItemSection = _config_lib.WorkflowItemSection
+build_config_model = _config_lib.build_config_model
+build_workflow_items = _config_lib.build_workflow_items
+dump_config_dict = _config_lib.dump_config_dict
+dump_workflow_items = _config_lib.dump_workflow_items
+
+_delivery_lib = _load_local_module("delivery")
+Delivery = _delivery_lib.Delivery
+DeliveryTarget = _delivery_lib.DeliveryTarget
+
+_legacy_lib = _load_local_module("legacy_config")
+parse_legacy_toml = _legacy_lib.parse_legacy_toml
+
+_client_lib = _load_local_module("runninghub_client")
+RunningHubClient = _client_lib.RunningHubClient
+RunningHubError = _client_lib.RunningHubError
+
+_detect_lib = _load_local_module("workflow_detect")
+LLM_DETECT_KEY_PROMPT = _detect_lib.LLM_DETECT_KEY_PROMPT
+LLM_DETECT_PROMPT = _detect_lib.LLM_DETECT_PROMPT
+detect_input_nodes = _detect_lib.detect_input_nodes
+detect_key_nodes = _detect_lib.detect_key_nodes
+describe_workflow_for_llm = _detect_lib.describe_workflow_for_llm
+parse_llm_nodes = _detect_lib.parse_llm_nodes
 
 
 __all__ = ["RunningHubGenericPlugin"]
@@ -368,6 +390,11 @@ class RunningHubGenericPlugin(Star):
         self._import_legacy_config_if_needed()
         await self._reload_from_context_config()
         self._migrate_embedded_nodes_to_workflow_nodes()
+        self.logger.info(
+            "[配置] 本地配置库已加载: package=%s file=%s",
+            _PLUGIN_PACKAGE or "(顶层)",
+            _config_lib.__file__,
+        )
         cfg = self.config
         self._semaphore = asyncio.Semaphore(max(1, cfg.generation.max_concurrent))
         self._rebuild_client()

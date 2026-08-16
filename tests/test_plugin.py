@@ -405,3 +405,57 @@ def test_embedded_node_slots_survive_astrbot_default_workflow_nodes(
     star._refresh_workflows()
     assert star._workflow_names() == ["旧配置"]
     assert star.config.workflows.items[0].input_nodes[0].node_id == "353"
+
+
+
+
+def test_namespaced_import_ignores_stale_top_level_lib(tmp_path: Path) -> None:
+    """回归测试：AstrBot 只重载 ``data.plugins.<插件目录>`` 命名空间。
+
+    顶层 ``rh_generic_lib`` 一旦被旧版本加载就会留在 sys.modules 里。插件在
+    AstrBot 内必须从自身包命名空间加载本地库，否则升级后 ``dump_config_dict``
+    是旧函数（没有 workflow_nodes），识别结果会写丢。
+    """
+    import shutil
+    import subprocess
+
+    root = tmp_path / "simroot"
+    package_dir = root / "simdata" / "plugins" / "astrobt_test_plugin"
+    lib_dir = package_dir / "rh_generic_lib"
+    shutil.copytree(PLUGIN_DIR / "rh_generic_lib", lib_dir)
+    shutil.copy2(PLUGIN_DIR / "main.py", package_dir / "main.py")
+
+    stale_root = tmp_path / "stale"
+    stale_lib = stale_root / "rh_generic_lib"
+    shutil.copytree(PLUGIN_DIR / "rh_generic_lib", stale_lib)
+    stale_config = stale_lib / "config.py"
+    stale_config.write_text(
+        stale_config.read_text(encoding="utf-8")
+        + "\n\n"
+        + "def dump_config_dict(config):\n"
+        + '    return {"config_version": "stale", "server": {}, "generation": {}, '
+        + '"feature": {}, "access": {}, "workflows": []}\n',
+        encoding="utf-8",
+    )
+
+    script = (
+        "import sys\n"
+        f'sys.path.insert(0, r"{stale_root}")\n'
+        f'sys.path.insert(0, r"{root}")\n'
+        "import importlib\n"
+        'm = importlib.import_module("simdata.plugins.astrobt_test_plugin.main")\n'
+        "out = m.dump_config_dict(m.GenericConfig())\n"
+        "print(m._config_lib.__file__)\n"
+        'print("workflow_nodes" in out)\n'
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(PLUGIN_DIR),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines[-2].startswith(str(lib_dir))
+    assert lines[-1] == "True"
