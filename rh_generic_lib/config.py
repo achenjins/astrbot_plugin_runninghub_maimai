@@ -134,7 +134,7 @@ class AccessSection(BaseModel):
     )
     admin_users: list[str] = Field(
         default_factory=list,
-        description="管理员用户 ID 列表；管理员可用 /rh中断 中断所有人的任务",
+        description="管理员用户 ID 列表；管理员可用 /wf中断 中断所有人的任务",
         json_schema_extra={"label": "管理员 ID", "placeholder": "用户ID，每行一个"},
     )
 
@@ -205,7 +205,7 @@ class WorkflowItemSection(BaseModel):
 
     name: str = Field(
         default="",
-        description="工作流显示名称，用于命令调用，如 /rh运行 动漫生图",
+        description="工作流显示名称，用于命令调用，如 /wf运行 动漫生图",
         json_schema_extra={"label": "工作流名称", "placeholder": "动漫生图"},
     )
     workflow_id: str = Field(

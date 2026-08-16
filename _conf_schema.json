@@ -133,7 +133,7 @@
         "description": "管理员用户 ID",
         "type": "list",
         "default": [],
-        "hint": "管理员可用 /rh中断 中断所有人的任务"
+        "hint": "管理员可用 /wf中断 中断所有人的任务"
       }
     }
   },
@@ -144,14 +144,14 @@
     "templates": {
       "workflow": {
         "name": "工作流",
-        "hint": "推荐用聊天命令 /识别工作流 自动生成；也可在此手动添加",
+        "hint": "推荐用聊天命令自动识别：/wf国内工作流 或 /wf国外工作流",
         "display_item": "name",
         "items": {
           "name": {
             "description": "工作流名称",
             "type": "string",
             "default": "",
-            "hint": "用于 /rh运行 <名称> 调用"
+            "hint": "用于 /wf运行 <名称> 调用"
           },
           "workflow_id": {
             "description": "RunningHub 工作流 ID",

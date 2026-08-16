@@ -12,11 +12,11 @@
 - 命令 / LLM 工具 / Web API 三种触发方式，自动撤回保留（仅 NapCat 适配器生效）
 
 命令：
-- /rh运行 <工作流名> [描述文本]
-- /工作流
-- /识别国外工作流 <工作流ID> [名称] / /识别国内工作流 <工作流ID> [名称]
-- /详细识别国外工作流 <工作流ID> [名称] / /详细识别国内工作流 <工作流ID> [名称]
-- /rh中断
+- /wf运行 <工作流名> [描述文本]
+- /wf工作流
+- /wf国外工作流 <工作流ID> [名称] / /wf国内工作流 <工作流ID> [名称]
+- /wf详细国外工作流 <工作流ID> [名称] / /wf详细国内工作流 <工作流ID> [名称]
+- /wf中断
 LLM 工具：run_workflow
 Web API：POST /api/plug/runninghub_workflow_adapter/run_workflow_api
 """
@@ -1858,7 +1858,7 @@ class RunningHubGenericPlugin(Star):
             self._mark_handled(event)
             return
 
-    @filter.command("rh中断")
+    @filter.command("wf中断")
     async def handle_rh_cancel(self, event: AstrMessageEvent) -> None:
         """中断任务：还在传文件阶段则直接结束；已提交则回复编号取消运行中的任务。"""
         if self._is_consumed(event):
@@ -2082,7 +2082,7 @@ class RunningHubGenericPlugin(Star):
 
         return None
 
-    @filter.command("工作流")
+    @filter.command("wf工作流")
     async def handle_list_workflows(self, event: AstrMessageEvent) -> None:
         """列出已配置的工作流。"""
         if self._is_consumed(event):
@@ -2107,7 +2107,7 @@ class RunningHubGenericPlugin(Star):
         await self._send_text(stream_id, "\n".join(lines))
         self._mark_handled(event)
 
-    @filter.command("识别国内工作流")
+    @filter.command("wf国内工作流")
     async def handle_detect_domestic_workflow(
         self, event: AstrMessageEvent, workflow_id: str = "", workflow_name: str = ""
     ) -> None:
@@ -2123,7 +2123,7 @@ class RunningHubGenericPlugin(Star):
             self._mark_handled(event)
             return
         if not str(workflow_id or "").strip():
-            await self._send_text(stream_id, "用法：/识别国内工作流 <工作流ID> [工作流名称]")
+            await self._send_text(stream_id, "用法：/wf国内工作流 <工作流ID> [工作流名称]")
             self._mark_handled(event)
             return
         name = str(workflow_name or "").strip() or str(workflow_id).strip()
@@ -2132,7 +2132,7 @@ class RunningHubGenericPlugin(Star):
         )
         self._mark_handled(event)
 
-    @filter.command("识别国外工作流")
+    @filter.command("wf国外工作流")
     async def handle_detect_overseas_workflow(
         self, event: AstrMessageEvent, workflow_id: str = "", workflow_name: str = ""
     ) -> None:
@@ -2148,7 +2148,7 @@ class RunningHubGenericPlugin(Star):
             self._mark_handled(event)
             return
         if not str(workflow_id or "").strip():
-            await self._send_text(stream_id, "用法：/识别国外工作流 <工作流ID> [工作流名称]")
+            await self._send_text(stream_id, "用法：/wf国外工作流 <工作流ID> [工作流名称]")
             self._mark_handled(event)
             return
         name = str(workflow_name or "").strip() or str(workflow_id).strip()
@@ -2157,7 +2157,7 @@ class RunningHubGenericPlugin(Star):
         )
         self._mark_handled(event)
 
-    @filter.command("详细识别国内工作流")
+    @filter.command("wf详细国内工作流")
     async def handle_detail_detect_domestic_workflow(
         self, event: AstrMessageEvent, workflow_id: str = "", workflow_name: str = ""
     ) -> None:
@@ -2173,7 +2173,7 @@ class RunningHubGenericPlugin(Star):
             self._mark_handled(event)
             return
         if not str(workflow_id or "").strip():
-            await self._send_text(stream_id, "用法：/详细识别国内工作流 <工作流ID> [工作流名称]")
+            await self._send_text(stream_id, "用法：/wf详细国内工作流 <工作流ID> [工作流名称]")
             self._mark_handled(event)
             return
         name = str(workflow_name or "").strip() or str(workflow_id).strip()
@@ -2182,7 +2182,7 @@ class RunningHubGenericPlugin(Star):
         )
         self._mark_handled(event)
 
-    @filter.command("详细识别国外工作流")
+    @filter.command("wf详细国外工作流")
     async def handle_detail_detect_overseas_workflow(
         self, event: AstrMessageEvent, workflow_id: str = "", workflow_name: str = ""
     ) -> None:
@@ -2198,7 +2198,7 @@ class RunningHubGenericPlugin(Star):
             self._mark_handled(event)
             return
         if not str(workflow_id or "").strip():
-            await self._send_text(stream_id, "用法：/详细识别国外工作流 <工作流ID> [工作流名称]")
+            await self._send_text(stream_id, "用法：/wf详细国外工作流 <工作流ID> [工作流名称]")
             self._mark_handled(event)
             return
         name = str(workflow_name or "").strip() or str(workflow_id).strip()
@@ -2401,21 +2401,21 @@ class RunningHubGenericPlugin(Star):
         )
         return nodes
 
-    @filter.command("rh运行")
+    @filter.command("wf运行")
     async def handle_pao_tu(self, event: AstrMessageEvent) -> None:
-        """运行配置好的工作流，例如：/rh运行 动漫生图 一只猫。"""
+        """运行配置好的工作流，例如：/wf运行 动漫生图 一只猫。"""
         if self._is_consumed(event):
             return
         stream_id = str(event.unified_msg_origin or "")
         # CommandFilter 的默认字符串参数只取第一个词，因此这里直接解析完整消息，
         # 以支持带空格的描述文本。
         rest = re.sub(
-            r"^/?rh运行[\s：:，,、]*", "", str(event.message_str or "").strip(), count=1
+            r"^/?wf运行[\s：:，,、]*", "", str(event.message_str or "").strip(), count=1
         ).strip()
         if not rest:
             available = "、".join(w.name for w in self._workflows if w.name) or "（未配置工作流）"
             await self._send_text(
-                stream_id, f"用法：/rh运行 <工作流名> <描述文本>\n已配置工作流：{available}"
+                stream_id, f"用法：/wf运行 <工作流名> <描述文本>\n已配置工作流：{available}"
             )
             self._mark_handled(event)
             return
@@ -2445,7 +2445,7 @@ class RunningHubGenericPlugin(Star):
             "只在用户明确要求生成图片/视频时才调用。"
             "调用后立即返回任务已提交，生成结果会异步自动发送到会话，你无需等待或轮询。"
             "若描述列出的工作流里没有用户想要的，可能是工作流刚更新、工具描述未刷新，不要瞎填名称，"
-            "告诉用户「工作流列表可能已更新，请重新加载插件后再试」，或改用 /rh运行 命令。"
+            "告诉用户「工作流列表可能已更新，请重新加载插件后再试」，或改用 /wf运行 命令。"
         )
         try:
             tool = self.context.get_llm_tool_manager().get_func("run_workflow")
@@ -2481,7 +2481,7 @@ class RunningHubGenericPlugin(Star):
             if workflow_name in all_names:
                 reason = (
                     f"工作流「{workflow_name}」包含图片/音频/视频/配置等输入节点，"
-                    "不支持自然语言调用，请让用户改用命令 /rh运行 手动运行"
+                    "不支持自然语言调用，请让用户改用命令 /wf运行 手动运行"
                 )
             else:
                 reason = f"工作流「{workflow_name}」未配置"

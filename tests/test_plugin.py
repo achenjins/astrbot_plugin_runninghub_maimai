@@ -172,7 +172,7 @@ def test_detect_key_nodes(star: plugin_main.RunningHubGenericPlugin) -> None:
 
 def test_empty_run_command_replies_usage(star: plugin_main.RunningHubGenericPlugin, ctx: FakeContext) -> None:
     async def _run() -> None:
-        event = FakeEvent("/rh运行")
+        event = FakeEvent("/wf运行")
         await star.handle_pao_tu(event)
 
     asyncio.run(_run())
@@ -196,7 +196,7 @@ def test_list_workflows_command(star: plugin_main.RunningHubGenericPlugin, ctx: 
     star._refresh_workflows()
 
     async def _run() -> None:
-        event = FakeEvent("/工作流")
+        event = FakeEvent("/wf工作流")
         await star.handle_list_workflows(event)
 
     asyncio.run(_run())
