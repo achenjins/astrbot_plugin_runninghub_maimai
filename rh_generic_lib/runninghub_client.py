@@ -179,29 +179,19 @@ class RunningHubClient:
         return await asyncio.to_thread(_do)
 
     async def upload_file(self, file_data: bytes, filename: str) -> str:
-        """上传文件到 RunningHub，返回文件名（新接口，形如 openapi/xxx.png）。
+        """上传文件到 RunningHub，返回工作流节点可用的 fileName（api/xxx.ext）。
 
-        官方新接口：POST /openapi/v2/media/upload/binary，
-        header Authorization（Bearer），multipart 仅 file 字段。
-        响应：{code:200, message, data:{type, download_url, filename, size}}。
-        兼容旧接口响应（code:0 / data.fileName）。
-
-        Args:
-            file_data: 文件字节内容。
-            filename: 文件名（含扩展名）。
-
-        Returns:
-            str: RunningHub 文件名（可直接作为节点 fieldValue）。
-
-        Raises:
-            RunningHubError: 上传失败时抛出。
+        这里使用工作流资源上传接口 ``POST {base_url}/task/openapi/upload``。
+        它返回 ``data.fileName``（形如 ``api/6fd...wav``），可直接作为
+        nodeInfoList 里的 fieldValue。新版 media/upload/binary 返回的
+        ``openapi/xxx`` 不是工作流节点加载路径，不能用于此场景。
         """
-
         def _do() -> dict[str, Any]:
             try:
                 response = requests.post(
-                    f"{self.base_url}/openapi/v2/media/upload/binary",
+                    f"{self.base_url}/task/openapi/upload",
                     headers={"Authorization": f"Bearer {self.api_key}"},
+                    data={"apiKey": self.api_key, "fileType": "input"},
                     files={"file": (filename, file_data)},
                     timeout=self.timeout,
                 )
@@ -212,7 +202,7 @@ class RunningHubClient:
 
         result = await asyncio.to_thread(_do)
         code = result.get("code")
-        # 新接口成功码为 200，旧接口为 0
+        # 该接口成功码为 0；个别部署也可能返回 200
         if code not in (0, 200, None):
             raise RunningHubError(
                 f"上传文件失败: {result.get('message') or result.get('msg') or result}"
@@ -220,11 +210,11 @@ class RunningHubClient:
         data = result.get("data")
         file_name = ""
         if isinstance(data, dict):
-            # 新接口字段 filename，旧接口 fileName
-            file_name = str(data.get("filename") or data.get("fileName") or "")
+            file_name = str(data.get("fileName") or data.get("filename") or "")
         if not file_name:
-            raise RunningHubError("上传文件失败: 响应缺少 filename")
+            raise RunningHubError("上传文件失败: 响应缺少 fileName")
         return file_name
+
 
     async def get_workflow_json(self, workflow_id: str) -> dict[str, Any]:
         """获取工作流完整 JSON（getJsonApiFormat 接口，官方文档规范）。

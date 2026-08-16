@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib
 import re
 import sys
@@ -134,6 +135,8 @@ class InputSession:
     editable_nodes: list[dict[str, str]] = field(default_factory=list)
     # 触发时的会话上下文（group_id/user_id），提交后用于 NapCat 直发与自动撤回
     chat_info: dict[str, str] = field(default_factory=dict)
+    # 已接收文件的 SHA-256，用于过滤 QQ 群文件 notice + 普通消息的重复投递
+    received_hashes: set[str] = field(default_factory=set)
 
 
 class RunningHubGenericPlugin(Star):
@@ -155,6 +158,7 @@ class RunningHubGenericPlugin(Star):
         self._input_session_keys_by_stream: dict[str, set[str]] = {}
         self._input_session_keys_by_user: dict[str, set[str]] = {}
         self._config_write_lock: asyncio.Lock = asyncio.Lock()
+        self._file_consume_lock: asyncio.Lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task | None = None
         self._cache_dir: Path | None = None
         self._workflows: list[WorkflowItemSection] = []
@@ -1294,49 +1298,73 @@ class RunningHubGenericPlugin(Star):
         stream_id: str,
         client: RunningHubClient,
     ) -> bool:
-        """把 files 列表按类型分配到等待节点并上传，返回是否已消费。"""
-        for file_type, source in files:
-            index = next(
-                (i for i, n in enumerate(session.waiting_nodes) if n["value_type"] == file_type),
-                None,
-            )
-            if index is None:
-                await self._send_text(stream_id, f"当前已不需要{type_name_of(file_type)}文件，已忽略")
-                continue
-            node = session.waiting_nodes.pop(index)
-            try:
-                file_data = await self._fetch_file_bytes(source)
-                filename = self._guess_filename(source, file_type, file_data)
-                file_name = await client.upload_file(file_data, filename)
-            except Exception as exc:
-                self.logger.error("上传文件到 RunningHub 失败: %s", exc)
-                await self._send_text(stream_id, f"文件上传失败：{exc}")
-                session.waiting_nodes.insert(index, node)
-                continue
-            session.collected.append(
-                {
-                    "nodeId": node["node_id"],
-                    "fieldName": node["field_name"],
-                    "fieldValue": file_name,
-                }
-            )
-            if file_type == "image":
-                session.uploaded_images += 1
-            elif file_type == "audio":
-                session.uploaded_audios += 1
-            elif file_type == "video":
-                session.uploaded_videos += 1
-            self.logger.info("已接收输入 %s: %s", node["label"], file_name)
+        """把 files 列表按类型分配到等待节点并上传，返回是否已消费。
 
-        if session.waiting_nodes:
-            await self._send_text(
-                stream_id,
-                f"已收到，还剩余：{self._build_waiting_tips_from_dicts(session.waiting_nodes)}（或发「跳过剩余」）",
-            )
+        QQ 群文件会同时以 notice(group_upload) 和普通 file 消息到达，
+        这里按内容 SHA-256 去重，并且只在本次调用确实消费了新文件时才
+        发送「已收到，还剩余…」汇总，避免连发两条。
+        """
+        async with self._file_consume_lock:
+            consumed_any = False
+            for file_type, source in files:
+                index = next(
+                    (i for i, n in enumerate(session.waiting_nodes) if n["value_type"] == file_type),
+                    None,
+                )
+                if index is None:
+                    await self._send_text(stream_id, f"当前已不需要{type_name_of(file_type)}文件，已忽略")
+                    continue
+                try:
+                    file_data = await self._fetch_file_bytes(source)
+                except Exception as exc:
+                    self.logger.error("读取待上传文件失败: %s", exc)
+                    await self._send_text(stream_id, f"文件上传失败：{exc}")
+                    continue
+                digest = hashlib.sha256(file_data).hexdigest()
+                if digest in session.received_hashes:
+                    # notice 和普通消息投递的同一个文件，只处理一次
+                    continue
+                session.received_hashes.add(digest)
+
+                node = session.waiting_nodes.pop(index)
+                try:
+                    filename = self._guess_filename(source, file_type, file_data)
+                    file_name = await client.upload_file(file_data, filename)
+                except Exception as exc:
+                    session.received_hashes.discard(digest)
+                    session.waiting_nodes.insert(index, node)
+                    self.logger.error("上传文件到 RunningHub 失败: %s", exc)
+                    await self._send_text(stream_id, f"文件上传失败：{exc}")
+                    continue
+                consumed_any = True
+                session.collected.append(
+                    {
+                        "nodeId": node["node_id"],
+                        "fieldName": node["field_name"],
+                        "fieldValue": file_name,
+                    }
+                )
+                if file_type == "image":
+                    session.uploaded_images += 1
+                elif file_type == "audio":
+                    session.uploaded_audios += 1
+                elif file_type == "video":
+                    session.uploaded_videos += 1
+                self.logger.info("已接收输入 %s: %s", node["label"], file_name)
+
+            if not consumed_any:
+                return True
+
+            if session.waiting_nodes:
+                await self._send_text(
+                    stream_id,
+                    f"已收到，还剩余：{self._build_waiting_tips_from_dicts(session.waiting_nodes)}（或发「跳过剩余」）",
+                )
+                return True
+
+            await self._after_files_collected(session, key, stream_id, client, "输入已收齐")
             return True
 
-        await self._after_files_collected(session, key, stream_id, client, "输入已收齐")
-        return True
 
     async def _ask_config_edit(self, session: InputSession, stream_id: str, notice: str = "") -> None:
         """进入可编辑配置确认阶段并向用户发确认提示。"""
@@ -1534,8 +1562,10 @@ class RunningHubGenericPlugin(Star):
         skipped = len(session.waiting_nodes)
         if skipped:
             notice = f"已跳过剩余 {skipped} 个文件"
+            await self._send_text(stream_id, f"收到，{notice}，正在准备提交…")
         else:
             notice = "输入已收齐"
+            await self._send_text(stream_id, "收到，输入已收齐，正在准备提交…")
         await self._after_files_collected(session, key, stream_id, client, notice)
         return True
 
@@ -1546,6 +1576,18 @@ class RunningHubGenericPlugin(Star):
 
     def _build_waiting_tips_from_dicts(self, waiting: list[dict[str, str]]) -> str:
         return self._format_waiting_summary(waiting)
+
+    def _event_has_qq_group_file_component(self, event: AstrMessageEvent) -> bool:
+        """判断消息里是否有 QQ 群文件直链组件（其真实内容由 notice 提供）。"""
+        for comp in event.get_messages():
+            if isinstance(comp, FileComponent):
+                source = str(getattr(comp, "url", "") or getattr(comp, "file", "") or "")
+                if any(
+                    marker in source.lower()
+                    for marker in ("gzc-download.ftn.qq.com", "ftn.qq.com")
+                ):
+                    return True
+        return False
 
     async def _extract_files_from_event(self, event: AstrMessageEvent) -> list[tuple[str, str]]:
         """从 AstrBot 消息事件提取文件，返回 [(类型 image/audio/video, 来源)]。
@@ -1582,6 +1624,13 @@ class RunningHubGenericPlugin(Star):
                     name = str(comp.name or "").strip()
                     source = await comp.get_file(allow_return_url=True)
                     source = source.removeprefix("file:///")
+                    # QQ 群文件的普通消息里是 gzc-download.ftn.qq.com 直链，
+                    # 直链下载到的是错误内容；真实文件由 notice group_upload 获取。
+                    if any(
+                        marker in source.lower()
+                        for marker in ("gzc-download.ftn.qq.com", "ftn.qq.com")
+                    ):
+                        continue
                     file_type = self._detect_file_type_from_name(name or source)
                     if source:
                         files.append((file_type, source))
@@ -1945,6 +1994,10 @@ class RunningHubGenericPlugin(Star):
             return
         if await self._extract_files_from_event(event):
             await self._handle_incoming_files(user_id, stream_id, event)
+            self._mark_handled(event)
+            return
+        if self._event_has_qq_group_file_component(event):
+            # 真实文件由 handle_notice_collector 处理，这里只拦截普通消息，避免进入默认 LLM
             self._mark_handled(event)
             return
 

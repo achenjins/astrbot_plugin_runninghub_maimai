@@ -621,3 +621,28 @@ def test_prompt_template_list_contains_preset(
     templates = star._list_prompt_templates()
     paths = [item["path"] for item in templates]
     assert "prompt/anima3_prompt_template.txt" in paths
+
+def test_upload_file_uses_legacy_workflow_endpoint() -> None:
+    from unittest.mock import patch
+
+    from rh_generic_lib import runninghub_client as client_module
+
+    client = client_module.RunningHubClient(
+        api_key="k", base_url="https://www.runninghub.cn", timeout=10, workflow_id=""
+    )
+    with patch("rh_generic_lib.runninghub_client.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = {
+            "code": 0,
+            "msg": "success",
+            "data": {"fileName": "api/abc.png", "fileType": "input"},
+        }
+
+        async def _run() -> str:
+            return await client.upload_file(b"imgdata", "ref.png")
+
+        file_name = asyncio.run(_run())
+    assert file_name == "api/abc.png"
+    called = mock_post.call_args
+    assert called.args[0].endswith("/task/openapi/upload")
+    assert called.kwargs["data"]["apiKey"] == "k"
+    assert called.kwargs["data"]["fileType"] == "input"
