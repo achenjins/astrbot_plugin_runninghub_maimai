@@ -86,6 +86,38 @@ textarea{resize:vertical;min-height:68px}
   transition:box-shadow .18s,border-color .18s;
 }
 .stat-card:hover{border-color:var(--border);box-shadow:var(--shadow-2)}
+  .balance-panel{
+    margin:0 0 18px;padding:14px 16px 16px;border:1px solid var(--divider);border-radius:var(--radius);
+    background:var(--surface);box-shadow:var(--shadow);
+  }
+  .balance-panel-head{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  .balance-title{display:flex;align-items:center;gap:10px;margin-right:auto;min-width:0}
+  .balance-title .stat-icon{width:38px;height:38px;border-radius:10px}
+  .balance-title h2{margin:0;font-size:14px;font-weight:600}
+  .balance-title p{margin:2px 0 0;font-size:12px;color:var(--muted)}
+  .balance-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+  .balance-card{
+    min-height:112px;padding:14px 16px;border:1px solid var(--divider);border-radius:11px;
+    background:var(--surface-2);display:flex;flex-direction:column;gap:10px;transition:.18s;position:relative;overflow:hidden;
+  }
+  .balance-card::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--primary);opacity:.55}
+  .balance-card.ok::before{background:var(--success)}
+  .balance-card.missing::before{background:var(--muted)}
+  .balance-card.error::before{background:var(--error)}
+  .balance-card-head{display:flex;align-items:center;gap:8px}
+  .balance-card-head .region-dot{width:8px;height:8px;border-radius:50%;background:var(--primary);flex:0 0 auto}
+  .balance-card.ok .region-dot{background:var(--success)}
+  .balance-card.missing .region-dot{background:var(--muted)}
+  .balance-card.error .region-dot{background:var(--error)}
+  .balance-card-head strong{font-size:13px;font-weight:600}
+  .balance-card-head .pill{margin-left:auto;font-size:11px;color:var(--muted);border:1px solid var(--divider);padding:2px 8px;border-radius:999px}
+  .balance-main{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+  .balance-main b{font-size:24px;font-weight:600;line-height:1.1;letter-spacing:.2px}
+  .balance-main span{color:var(--muted);font-size:12px}
+  .balance-sub{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px}
+  .balance-sub b{color:var(--text);font-weight:600}
+  .balance-error{color:var(--error);font-size:12px;margin:0}
+  .balance-hint{color:var(--muted);font-size:12px;margin:0}
 .stat-icon{width:44px;height:44px;border-radius:11px;display:grid;place-items:center;flex:0 0 auto}
 .stat-icon.blue{background:var(--primary-light);color:var(--primary)}
 .stat-icon.teal{background:rgba(3,201,215,.10);color:var(--info)}
@@ -218,6 +250,7 @@ dialog::backdrop{background:var(--overlay)}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:5px;border:2px solid var(--bg)}
 @media (max-width:640px){
   .stat-grid{grid-template-columns:repeat(2,1fr)}
+    .balance-grid{grid-template-columns:1fr}
   .grid{columns:1;column-gap:0}
   .app{padding:12px 12px 64px}
   .brand .sub{display:none}
@@ -247,6 +280,21 @@ dialog::backdrop{background:var(--overlay)}
       <button class="btn outlined" id="saveBtn" disabled><span class="icon icon-save" style="width:18px;height:18px" aria-hidden="true"></span>保存配置</button>
     </div>
   </header>
+
+    <section class="balance-panel">
+      <div class="balance-panel-head">
+        <div class="balance-title">
+          <div class="stat-icon blue"><span class="icon icon-wallet" style="width:20px;height:20px" aria-hidden="true"></span></div>
+          <div>
+            <h2>RunningHub 余额</h2>
+            <p id="balanceUpdatedAt">尚未查询</p>
+          </div>
+        </div>
+        <button class="btn text small" id="balanceRefreshBtn"><span class="icon icon-refresh" style="width:14px;height:14px" aria-hidden="true"></span>刷新余额</button>
+      </div>
+      <div class="balance-grid" id="balanceGrid"></div>
+    </section>
+
 
   <section class="stat-grid" id="statGrid">
     <div class="stat-card"><div class="stat-icon blue"><span class="icon icon-sitemap" style="width:20px;height:20px" aria-hidden="true"></span></div><div class="stat-body"><b id="statWorkflows">0</b><span>工作流</span></div></div>
@@ -400,6 +448,7 @@ const TYPE_META = {
 };
 
 const state = { workflows: [], templates: [], original: null, dirty: false, saving: false, loading: true, search: "", region: "all" };
+const balanceState = { regions: [], loading: false, updatedAt: "" };
 let workflowDialogIndex = -1;
 let nodeDialogState = { wf: -1, node: -1 };
 let analyzeState = { wf: -1, nodes: [], method: "" };
@@ -423,6 +472,64 @@ function normalizeApiResponse(raw) {
   if (raw.success === false) return raw;
   if (raw.data && typeof raw.data === "object") return raw.data;
   return raw;
+}
+
+function balanceMarkup(region) {
+  const status = region?.status || "error";
+  const account = region?.account || null;
+  if (status === "ok" && account) {
+    const coins = esc(account.remain_coins || "0");
+    const tasks = esc(account.current_task_counts || "0");
+    const money = account.remain_money ? `${esc(account.remain_money)} ${esc(account.currency || "")}` : "—";
+    const apiType = esc(account.api_type || "—");
+    return `<div class="balance-card ok">
+      <div class="balance-card-head"><span class="region-dot"></span><strong>${esc(region.label || "")}</strong><span class="pill">${apiType}</span></div>
+      <div class="balance-main"><b>${coins}</b><span>RH 币</span></div>
+      <div class="balance-sub"><span>运行中：<b>${tasks}</b></span><span>钱包：<b>${money}</b></span></div>
+    </div>`;
+  }
+  const hint = status === "missing" ? "请在插件配置中填写该区域 API Key" : esc(region?.message || "查询失败");
+  return `<div class="balance-card ${status}">
+    <div class="balance-card-head"><span class="region-dot"></span><strong>${esc(region.label || "")}</strong><span class="pill">${status === "missing" ? "未配置" : "异常"}</span></div>
+    <p class="${status === "missing" ? "balance-hint" : "balance-error"}">${hint}</p>
+    <div class="balance-main"><b>—</b><span>RH 币</span></div>
+  </div>`;
+}
+
+function renderBalance() {
+  const grid = $("balanceGrid");
+  if (!grid) return;
+  const regions = balanceState.regions;
+  grid.innerHTML = regions.length
+    ? regions.map(balanceMarkup).join("")
+    : '<div class="balance-card missing"><div class="balance-card-head"><span class="region-dot"></span><strong>暂无余额信息</strong></div><p class="balance-hint">点击右上角「刷新余额」查询 runninghub.ai / runninghub.cn 账户。</p></div>';
+  $("balanceUpdatedAt").textContent = balanceState.updatedAt
+    ? `更新于 ${balanceState.updatedAt}`
+    : balanceState.loading ? "查询中…" : "尚未查询";
+}
+
+async function loadBalance() {
+  balanceState.loading = true;
+  renderBalance();
+  const btn = $("balanceRefreshBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const res = normalizeApiResponse(await bridge.apiGet("page/account"));
+    if (!res || res.success === false) throw new Error(res?.message || "读取余额失败");
+    balanceState.regions = Array.isArray(res.regions) ? res.regions : [];
+    const failed = balanceState.regions.filter((item) => item?.status === "error").length;
+    const now = new Date();
+    balanceState.updatedAt = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
+    if (failed) toast(`${failed} 个区域余额查询失败，鼠标移到异常卡片查看原因`, "warn", 4200);
+  } catch (err) {
+    balanceState.regions = [];
+    balanceState.updatedAt = "";
+    toast(String(err?.message || err), "err", 6000);
+  } finally {
+    balanceState.loading = false;
+    if (btn) btn.disabled = false;
+    renderBalance();
+  }
 }
 function toast(message, type = "info", duration = 3200) {
   const el = document.createElement("div");
@@ -1020,9 +1127,10 @@ $("azReplaceBtn").addEventListener("click", () => applyAnalyze("replace"));
 $("azMergeBtn").addEventListener("click", () => applyAnalyze("merge"));
 $("addWorkflowBtn").addEventListener("click", () => openWorkflowDialog(-1));
 $("refreshBtn").addEventListener("click", async () => {
-  try { await loadConfig(); toast("配置已刷新", "ok"); }
+  try { await Promise.all([loadConfig(), loadBalance()]); toast("配置与余额已刷新", "ok"); }
   catch (err) { toast(String(err?.message || err), "err"); }
 });
+$("balanceRefreshBtn").addEventListener("click", loadBalance);
 $("saveBtn").addEventListener("click", saveConfig);
 $("wfUploadBtn").addEventListener("click", () => $("wfTemplateFile").click());
 $("wfTemplateFile").addEventListener("change", (event) => {

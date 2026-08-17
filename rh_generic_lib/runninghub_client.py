@@ -128,6 +128,29 @@ class RunningHubClient:
         """
         return await self._post("/openapi/v2/query", {"taskId": str(task_id)})
 
+    async def account_status(self) -> dict[str, Any]:
+        """查询账户状态（RH 币余额、钱包、当前运行任务数等）。
+
+        Returns:
+            dict: 响应里的 ``data`` 对象，包含 ``remainCoins`` / ``remainMoney`` /
+                ``currentTaskCounts`` / ``currency`` / ``apiType`` 等字段。
+
+        Raises:
+            RunningHubError: 未配置 API Key 或接口返回错误码时抛出。
+        """
+        if not self.api_key:
+            raise RunningHubError("未配置 API Key")
+        result = await self._post("/uc/openapi/accountStatus", {"apikey": self.api_key})
+        code = result.get("code")
+        if code not in (0, 200, None):
+            raise RunningHubError(
+                f"获取账户信息失败: {result.get('msg') or result.get('message') or result}"
+            )
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise RunningHubError("获取账户信息失败: 响应缺少 data")
+        return data
+
     async def cancel(self, task_id: str) -> dict[str, Any]:
         """取消任务（POST /task/openapi/cancel）。
 

@@ -683,3 +683,134 @@ def test_load_llm_template_from_persistent_dir_with_prompt_prefix(
         assert star._load_llm_template(workflow) == "PERSISTED_TEMPLATE"
     finally:
         target.unlink(missing_ok=True)
+
+
+def test_page_account_endpoint_reports_both_regions(
+    star: plugin_main.RunningHubGenericPlugin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        plugin_main.RunningHubGenericPlugin,
+        "_web_jsonify",
+        staticmethod(lambda payload: payload),
+    )
+    star._apply_config_dict({"server": {"api_key": "overseas_key", "api_key_cn": ""}})
+
+    class FakeClient:
+        async def account_status(self) -> dict:
+            return {
+                "remainCoins": "123.4",
+                "currentTaskCounts": "2",
+                "remainMoney": "5.6",
+                "currency": "USD",
+                "apiType": "NORMAL",
+            }
+
+    monkeypatch.setattr(star, "_get_client", lambda region: FakeClient())
+    payload = asyncio.run(star.handle_page_get_account())
+    assert payload["success"] is True
+    regions = payload["data"]["regions"]
+    overseas = next(item for item in regions if item["region"] == "overseas")
+    assert overseas["status"] == "ok"
+    assert overseas["account"]["remain_coins"] == "123.4"
+    domestic = next(item for item in regions if item["region"] == "domestic")
+    assert domestic["status"] == "missing"
+
+
+
+def test_account_status_requests_uc_endpoint() -> None:
+    from unittest.mock import patch
+
+    from rh_generic_lib import runninghub_client as client_module
+
+    client = client_module.RunningHubClient(
+        api_key="k", base_url="https://www.runninghub.cn", timeout=10, workflow_id=""
+    )
+    with patch("rh_generic_lib.runninghub_client.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = {
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "remainCoins": "888",
+                "currentTaskCounts": "1",
+                "remainMoney": "12.5",
+                "currency": "CNY",
+                "apiType": "NORMAL",
+            },
+        }
+
+        async def _run() -> dict:
+            return await client.account_status()
+
+        account = asyncio.run(_run())
+    assert account["remainCoins"] == "888"
+    called = mock_post.call_args
+    assert called.args[0].endswith("/uc/openapi/accountStatus")
+    assert called.kwargs["json"] == {"apikey": "k"}
+    assert called.kwargs["headers"]["Authorization"] == "Bearer k"
+
+
+def test_task_history_assets_exist() -> None:
+    page = PLUGIN_DIR / "pages" / "task-history" / "index.html"
+    assert page.is_file()
+    text = page.read_text(encoding="utf-8")
+    assert "page/tasks" in text
+    style = PLUGIN_DIR / "pages" / "task-history" / "style.css"
+    assert style.is_file()
+    for name in ("history.svg", "wallet.svg", "refresh.svg", "delete.svg"):
+        assert (PLUGIN_DIR / "pages" / "task-history" / "assets" / "icons" / name).is_file()
+    editor_page = (PLUGIN_DIR / "pages" / "workflow-editor" / "index.html").read_text(encoding="utf-8")
+    assert "page/account" in editor_page
+
+
+def test_consume_coins_parses_v2_usage() -> None:
+    star = plugin_main.RunningHubGenericPlugin
+    assert star._consume_coins_from_result({"usage": {"consumeCoins": "3.25"}}) == "3.25"
+    assert star._consume_coins_from_result({"usage": {"consume_coins": "7"}}) == "7"
+    assert star._consume_coins_from_result({"consumeCoins": 2}) == "2"
+    assert star._consume_coins_from_result({"status": "RUNNING"}) == "0"
+
+
+def test_task_history_stores_only_minimal_fields_and_dedupes(
+    ctx: FakeContext,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    star = plugin_main.RunningHubGenericPlugin(ctx, None)
+
+    async def _run() -> None:
+        await star._record_task_history("task_1", "测试工作流", "1.5")
+        await star._record_task_history("task_1", "重复任务", "9")
+
+    asyncio.run(_run())
+    assert star._task_history == [
+        {"task_id": "task_1", "workflow": "测试工作流", "coins": "1.5"}
+    ]
+    path = star._task_history_path()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw == star._task_history
+    assert set(raw[0].keys()) == set(plugin_main._TASK_HISTORY_FIELDS)
+
+    reloaded = plugin_main.RunningHubGenericPlugin(ctx, None)
+    reloaded._load_task_history()
+    assert reloaded._task_history == raw
+
+
+def test_task_history_caps_records(
+    ctx: FakeContext,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    monkeypatch.setattr(plugin_main, "_TASK_HISTORY_MAX", 2)
+    star = plugin_main.RunningHubGenericPlugin(ctx, None)
+
+    async def _run() -> None:
+        for index in range(3):
+            await star._record_task_history(f"task_{index}", "工作流", "0.5")
+
+    asyncio.run(_run())
+    assert len(star._task_history) == 2
+    assert star._task_history[0]["task_id"] == "task_2"
+    assert star._task_history[-1]["task_id"] == "task_1"

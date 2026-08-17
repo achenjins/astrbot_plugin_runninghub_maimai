@@ -27,6 +27,7 @@ import asyncio
 import base64
 import hashlib
 import importlib
+import json
 import re
 import sys
 import time
@@ -102,6 +103,10 @@ _MAX_NODES = 32
 
 # 上传/下载单个文件的最大字节数（512MB），防止异常或恶意超大内容撑爆内存
 _MAX_FILE_BYTES = 512 * 1024 * 1024
+# 最近任务记录：只保留 task_id / workflow / coins 三个字段，最多 200 条
+_TASK_HISTORY_FILE = "task_history.json"
+_TASK_HISTORY_MAX = 200
+_TASK_HISTORY_FIELDS = ("task_id", "workflow", "coins")
 
 # 交互收集会话中，用于"跳过剩余文件、直接开始运行"的触发词
 _FINISH_KEYWORDS = {
@@ -165,6 +170,9 @@ class RunningHubGenericPlugin(Star):
         self._user_requests: dict[str, list[float]] = {}
         self._task_meta: dict[str, dict[str, str]] = {}
         self._cancel_choices: dict[str, list[str]] = {}
+        self._task_history: list[dict[str, str]] = []
+        self._task_history_recorded: set[str] = set()
+        self._task_history_lock: asyncio.Lock = asyncio.Lock()
 
     def _event_ctx(self, event: AstrMessageEvent) -> dict[str, str]:
         """把 AstrBot 事件转换为业务层使用的扁平上下文。"""
@@ -394,6 +402,7 @@ class RunningHubGenericPlugin(Star):
         self._import_legacy_config_if_needed()
         await self._reload_from_context_config()
         self._migrate_embedded_nodes_to_workflow_nodes()
+        self._load_task_history()
         self.logger.info(
             "[配置] 本地配置库已加载: package=%s file=%s",
             _PLUGIN_PACKAGE or "(顶层)",
@@ -452,6 +461,24 @@ class RunningHubGenericPlugin(Star):
             self.handle_page_read_prompt_template,
             ["GET"],
             "可视化页面：读取扩写提示词模板内容",
+        )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/account",
+            self.handle_page_get_account,
+            ["GET"],
+            "可视化页面：查询 RunningHub 账户余额",
+        )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/tasks",
+            self.handle_page_get_tasks,
+            ["GET"],
+            "可视化页面：读取最近任务记录",
+        )
+        self.context.register_web_api(
+            "/runninghub_workflow_adapter/page/tasks/clear",
+            self.handle_page_clear_tasks,
+            ["POST"],
+            "可视化页面：清空最近任务记录",
         )
 
         self.logger.info(
@@ -1750,6 +1777,8 @@ class RunningHubGenericPlugin(Star):
         """
         client = client or self._client
         chat_info = self._extract_chat_info(kwargs or {})
+        task_meta = self._task_meta.get(task_id) or {}
+        workflow_name = str(task_meta.get("name") or "")
         try:
             try:
                 result = await client.wait_for_result(task_id)
@@ -1758,6 +1787,12 @@ class RunningHubGenericPlugin(Star):
                 if stream_id:
                     await self._send_text(stream_id, "哦不好意思，任务运行失败了")
                 return
+
+            # 任务成功后立即记录消耗（只存 task_id / 工作流 / RH 币）
+            await self._record_task_history(
+                task_id, workflow_name, self._consume_coins_from_result(result)
+            )
+
 
             result_items: list[tuple[str, str]] = []
             for item in result.get("results") or []:
@@ -2684,6 +2719,143 @@ class RunningHubGenericPlugin(Star):
         except ImportError:
             from flask import request as web_request
             return web_request.get_json(silent=True) or {}
+
+    # ── 余额 / 任务记录（Pages）───────────────────────────────
+
+    def _task_history_path(self) -> Path:
+        """最近任务记录文件路径（保存在 AstrBot 插件持久化目录）。"""
+        directory = Path(get_astrbot_plugin_data_path()).resolve() / _PLUGIN_DIR.name
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory / _TASK_HISTORY_FILE
+
+    def _load_task_history(self) -> None:
+        """从插件持久化目录读取最近任务记录（只保留三个业务字段）。"""
+        path = self._task_history_path()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            self.logger.warning("[任务记录] 读取历史文件失败: %s", exc)
+            return
+        if not isinstance(raw, list):
+            raw = []
+        records: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            task_id = str(item.get("task_id") or "").strip()
+            if not task_id or task_id in seen:
+                continue
+            workflow = str(item.get("workflow") or "").strip()
+            coins = str(item.get("coins") or "0").strip()
+            seen.add(task_id)
+            records.append({"task_id": task_id, "workflow": workflow, "coins": coins})
+            if len(records) >= _TASK_HISTORY_MAX:
+                break
+        self._task_history = records
+        self._task_history_recorded = seen
+
+    def _write_task_history_file(self) -> None:
+        """原子写入任务记录文件（调用方需持有 _task_history_lock）。"""
+        path = self._task_history_path()
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(
+            json.dumps(self._task_history, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp.replace(path)
+
+    async def _record_task_history(self, task_id: str, workflow: str, coins: Any) -> None:
+        """追加一条任务记录（最新在前，按 task_id 去重，最多 200 条）。"""
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return
+        workflow = str(workflow or "").strip()
+        coins = str(coins if coins is not None else "0").strip()
+        async with self._task_history_lock:
+            if task_id in self._task_history_recorded:
+                return
+            self._task_history_recorded.add(task_id)
+            self._task_history.insert(0, {"task_id": task_id, "workflow": workflow, "coins": coins})
+            del self._task_history[_TASK_HISTORY_MAX:]
+            if len(self._task_history_recorded) > _TASK_HISTORY_MAX * 2:
+                self._task_history_recorded = {
+                    str(item.get("task_id") or "") for item in self._task_history
+                }
+            try:
+                await asyncio.to_thread(self._write_task_history_file)
+            except Exception as exc:  # pragma: no cover
+                self.logger.warning("[任务记录] 写入历史文件失败: %s", exc)
+
+    @staticmethod
+    def _consume_coins_from_result(result: Any) -> str:
+        """从 RunningHub 任务查询响应里提取消耗的 RH 币。"""
+        if isinstance(result, dict):
+            usage = result.get("usage")
+            if isinstance(usage, dict):
+                coins = usage.get("consumeCoins") or usage.get("consume_coins")
+                if coins is not None:
+                    return str(coins).strip()
+            coins = result.get("consumeCoins")
+            if coins is not None:
+                return str(coins).strip()
+        return "0"
+
+    async def handle_page_get_account(self):
+        """可视化页面 API：查询两个区域的 RunningHub 账户余额。"""
+        regions: list[dict[str, Any]] = []
+        for region, key_attr, label in (
+            ("overseas", "api_key", "国外 runninghub.ai"),
+            ("domestic", "api_key_cn", "国内 runninghub.cn"),
+        ):
+            entry: dict[str, Any] = {"region": region, "label": label, "status": "ok", "message": ""}
+            api_key = str(getattr(self.config.server, key_attr) or "")
+            if not api_key:
+                entry.update({"status": "missing", "message": "未配置 API Key", "account": None})
+                regions.append(entry)
+                continue
+            client = self._get_client(region)
+            if client is None:
+                self._rebuild_client()
+                client = self._get_client(region)
+            if client is None:
+                entry.update({"status": "error", "message": "客户端初始化失败", "account": None})
+                regions.append(entry)
+                continue
+            try:
+                account = await asyncio.wait_for(client.account_status(), timeout=20)
+            except Exception as exc:
+                entry.update({"status": "error", "message": str(exc), "account": None})
+            else:
+                entry["account"] = {
+                    "remain_coins": str(account.get("remainCoins") or "0"),
+                    "current_task_counts": str(account.get("currentTaskCounts") or "0"),
+                    "remain_money": str(account.get("remainMoney") or ""),
+                    "currency": str(account.get("currency") or ""),
+                    "api_type": str(account.get("apiType") or ""),
+                }
+            regions.append(entry)
+        return self._web_jsonify({"success": True, "data": {"regions": regions}})
+
+    async def handle_page_get_tasks(self):
+        """可视化页面 API：读取最近任务记录（最新在前）。"""
+        records = [dict(item) for item in self._task_history]
+        return self._web_jsonify({"success": True, "data": {"records": records}})
+
+    async def handle_page_clear_tasks(self):
+        """可视化页面 API：清空最近任务记录。"""
+        async with self._task_history_lock:
+            self._task_history.clear()
+            self._task_history_recorded.clear()
+            try:
+                await asyncio.to_thread(self._write_task_history_file)
+            except Exception as exc:  # pragma: no cover
+                self.logger.warning("[任务记录] 清空历史文件失败: %s", exc)
+                return self._web_jsonify({"success": False, "message": f"清空失败: {exc}"})
+        return self._web_jsonify({"success": True, "message": "任务记录已清空"})
+
 
     def _page_config_payload(self) -> dict[str, Any]:
         """生成可视化页面使用的配置快照（只暴露工作流与节点）。"""
