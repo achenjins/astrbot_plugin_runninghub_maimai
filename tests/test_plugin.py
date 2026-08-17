@@ -750,17 +750,15 @@ def test_account_status_requests_uc_endpoint() -> None:
     assert called.kwargs["headers"]["Authorization"] == "Bearer k"
 
 
-def test_task_history_assets_exist() -> None:
-    page = PLUGIN_DIR / "pages" / "task-history" / "index.html"
-    assert page.is_file()
+def test_task_history_lives_in_merged_editor_page() -> None:
+    assert not (PLUGIN_DIR / "pages" / "task-history").exists()
+    page = PLUGIN_DIR / "pages" / "workflow-editor" / "index.html"
     text = page.read_text(encoding="utf-8")
     assert "page/tasks" in text
-    style = PLUGIN_DIR / "pages" / "task-history" / "style.css"
-    assert style.is_file()
+    assert "page/tasks/clear" in text
+    assert "page/account" in text
     for name in ("history.svg", "wallet.svg", "refresh.svg", "delete.svg"):
-        assert (PLUGIN_DIR / "pages" / "task-history" / "assets" / "icons" / name).is_file()
-    editor_page = (PLUGIN_DIR / "pages" / "workflow-editor" / "index.html").read_text(encoding="utf-8")
-    assert "page/account" in editor_page
+        assert (PLUGIN_DIR / "pages" / "workflow-editor" / "assets" / "icons" / name).is_file()
 
 
 def test_consume_coins_parses_v2_usage() -> None:

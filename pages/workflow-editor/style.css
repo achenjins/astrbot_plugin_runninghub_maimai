@@ -32,3 +32,4 @@
 .icon-template { -webkit-mask-image: url("./assets/icons/template.svg"); mask-image: url("./assets/icons/template.svg"); }
 .icon-preview  { -webkit-mask-image: url("./assets/icons/preview.svg");  mask-image: url("./assets/icons/preview.svg"); }
 .icon-wallet   { -webkit-mask-image: url("./assets/icons/wallet.svg");   mask-image: url("./assets/icons/wallet.svg"); }
+.icon-history  { -webkit-mask-image: url("./assets/icons/history.svg");  mask-image: url("./assets/icons/history.svg"); }

@@ -89,8 +89,7 @@ pip install -r requirements.txt
 
 ## Pages 页面怎么用
 
-需要 AstrBot 4.24.2+：**插件详情 → Pages → workflow-editor**（页面路径在插件包里，打开后会连接插件）。
-插件提供两个 Pages：`workflow-editor`（配置 + 余额）和 `task-history`（最近任务记录）。
+需要 AstrBot 4.24.2+：**插件详情 → Pages → workflow-editor**。页面顶部有两个标签页：「工作流配置」和「任务记录」，点标签即可切换，不用开两个 Pages。
 
 页面能做什么：
 
@@ -100,7 +99,7 @@ pip install -r requirements.txt
 - LLM 扩写模板上传 / 预览 / 选择，保存在 `data/plugin_data/<插件目录>/prompt/`，更新插件不丢失；
 - 所有修改点「保存配置」才生效，保存后插件热更新。
 - 页面顶部显示国内外 RunningHub 余额（RH 币 / 运行中任务 / 钱包），可手动刷新；
-- `task-history` 页面显示最近任务记录，只保留任务 ID、工作流名称和消耗的 RH 币，支持刷新 / 复制任务 ID / 清空；成功任务会在运行结束后自动写入。
+- 「任务记录」标签页显示最近任务记录，只保留任务 ID、工作流名称和消耗的 RH 币，支持刷新 / 复制任务 ID / 清空；成功任务会在运行结束后自动写入。
 
 旧版 AstrBot 没有 Pages 入口时，仍可用插件配置页里的「工作流列表 + 输入节点列表」动态表单。
 

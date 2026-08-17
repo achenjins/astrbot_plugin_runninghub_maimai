@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>工作流节点配置</title>
+<title>RunningHub 控制台</title>
 <link rel="stylesheet" href="./style.css">
 <style>
 *{box-sizing:border-box}
@@ -118,6 +118,60 @@ textarea{resize:vertical;min-height:68px}
   .balance-sub b{color:var(--text);font-weight:600}
   .balance-error{color:var(--error);font-size:12px;margin:0}
   .balance-hint{color:var(--muted);font-size:12px;margin:0}
+  .page-tabs{
+    display:flex;align-items:center;gap:4px;width:max-content;max-width:100%;margin:0 0 18px;padding:4px;
+    border:1px solid var(--divider);border-radius:12px;background:var(--surface-2);
+  }
+  .page-tab{
+    min-height:34px;padding:0 14px;border:1px solid transparent;border-radius:9px;background:transparent;
+    color:var(--muted);display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:500;transition:.15s;
+  }
+  .page-tab:hover{color:var(--text)}
+  .page-tab.active{background:var(--surface);color:var(--primary);border-color:var(--divider);box-shadow:var(--shadow)}
+  .tab-panel{min-width:0}
+  .task-summary-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:0 0 18px}
+  .task-summary-grid .stat-body b{font-size:19px}
+  .task-panel{
+    border:1px solid var(--divider);border-radius:var(--radius);background:var(--surface);
+    box-shadow:var(--shadow);overflow:hidden;
+  }
+  .task-panel-head{
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:13px 16px 0;
+  }
+  .task-panel-head h2{margin:0 auto 0 0;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .task-panel-head .count{color:var(--muted);font-size:12px;font-weight:400}
+  .task-table-head,.task-row{
+    display:grid;grid-template-columns:minmax(160px,1.35fr) minmax(120px,1fr) 132px;gap:16px;
+    align-items:center;padding:13px 18px;
+  }
+  .task-table-head{
+    margin-top:12px;background:var(--surface-2);border-top:1px solid var(--divider);border-bottom:1px solid var(--divider);
+    color:var(--muted);font-size:12px;font-weight:500;
+  }
+  .task-row{border-bottom:1px solid var(--divider);transition:background .14s;position:relative}
+  .task-row:last-child{border-bottom:none}
+  .task-row:hover{background:var(--primary-light)}
+  .task-row::before{content:"";position:absolute;left:0;top:18%;bottom:18%;width:3px;border-radius:0 3px 3px 0;background:var(--primary);opacity:0;transition:opacity .14s}
+  .task-row:hover::before{opacity:.7}
+  .task-id{font-family:ui-monospace,Consolas,SFMono-Regular,monospace;font-size:13px;word-break:break-all;cursor:pointer}
+  .task-id .copy-hint{display:inline-block;margin-left:8px;color:var(--muted);font-size:11px;opacity:0;transition:opacity .14s}
+  .task-row:hover .copy-hint{opacity:1}
+  .task-workflow{display:flex;align-items:center;min-width:0}
+  .task-workflow .chip{
+    max-width:100%;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:500;
+    background:var(--primary-light);color:var(--primary-dark);border:1px solid rgba(60,150,202,.22);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  @media (prefers-color-scheme: dark){ .task-workflow .chip{color:#8ec8ea} }
+  .task-coins{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
+  .task-coins .coin-icon{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:rgba(255,193,7,.14);color:var(--warning);flex:0 0 auto}
+  .task-coins b{font-size:16px;font-weight:600;white-space:nowrap}
+  .task-coins span{color:var(--muted);font-size:12px;white-space:nowrap}
+  .task-empty{padding:52px 20px;text-align:center;color:var(--muted)}
+  .task-empty .big{width:64px;height:64px;margin:0 auto 14px;border-radius:18px;display:grid;place-items:center;background:var(--primary-light);color:var(--primary)}
+  .task-empty h3{margin:0 0 6px;font-size:15px;color:var(--text)}
+  .task-empty p{margin:0;font-size:13px}
+  .task-error{color:var(--error);font-size:12px;margin:0}
 .stat-icon{width:44px;height:44px;border-radius:11px;display:grid;place-items:center;flex:0 0 auto}
 .stat-icon.blue{background:var(--primary-light);color:var(--primary)}
 .stat-icon.teal{background:rgba(3,201,215,.10);color:var(--info)}
@@ -251,6 +305,10 @@ dialog::backdrop{background:var(--overlay)}
 @media (max-width:640px){
   .stat-grid{grid-template-columns:repeat(2,1fr)}
     .balance-grid{grid-template-columns:1fr}
+    .task-summary-grid{grid-template-columns:1fr}
+    .task-table-head{display:none}
+    .task-row{grid-template-columns:1fr auto;grid-template-areas:"workflow coins" "id id";row-gap:8px}
+    .task-workflow{grid-area:workflow}.task-coins{grid-area:coins}.task-id{grid-area:id}
   .grid{columns:1;column-gap:0}
   .app{padding:12px 12px 64px}
   .brand .sub{display:none}
@@ -270,16 +328,24 @@ dialog::backdrop{background:var(--overlay)}
     <div class="brand">
       <div class="logo-mark"><span class="icon icon-sitemap" style="width:20px;height:20px" aria-hidden="true"></span></div>
       <div>
-        <h1>工作流输入节点</h1>
+        <h1>RunningHub 控制台</h1>
         <p class="sub" id="pluginMeta">runninghub_workflow_adapter</p>
       </div>
     </div>
-    <div class="actions">
+    <div class="actions" id="workflowActions">
       <button class="btn text" id="refreshBtn" title="重新读取配置"><span class="icon icon-refresh" style="width:18px;height:18px" aria-hidden="true"></span>刷新</button>
       <button class="btn primary" id="addWorkflowBtn"><span class="icon icon-plus" style="width:18px;height:18px" aria-hidden="true"></span>新建工作流</button>
       <button class="btn outlined" id="saveBtn" disabled><span class="icon icon-save" style="width:18px;height:18px" aria-hidden="true"></span>保存配置</button>
     </div>
   </header>
+
+    <nav class="page-tabs" id="pageTabs">
+      <button class="page-tab active" data-tab="workflows" type="button"><span class="icon icon-sitemap" style="width:16px;height:16px" aria-hidden="true"></span>工作流配置</button>
+      <button class="page-tab" data-tab="tasks" type="button"><span class="icon icon-history" style="width:16px;height:16px" aria-hidden="true"></span>任务记录</button>
+    </nav>
+
+    <section class="tab-panel" id="workflowsPanel">
+
 
     <section class="balance-panel">
       <div class="balance-panel-head">
@@ -322,6 +388,35 @@ dialog::backdrop{background:var(--overlay)}
     <h3>还没有工作流</h3>
     <p>点击右上角「新建工作流」，或回到聊天窗口发送 <code>/wf国外工作流 工作流ID 名称</code> 自动识别。</p>
   </div>
+    </section>
+
+    <section class="tab-panel hidden" id="tasksPanel">
+      <section class="task-summary-grid">
+        <div class="stat-card"><div class="stat-icon blue"><span class="icon icon-history" style="width:20px;height:20px" aria-hidden="true"></span></div><div class="stat-body"><b id="taskStatCount">0</b><span>最近任务记录</span></div></div>
+        <div class="stat-card"><div class="stat-icon amber"><span class="icon icon-wallet" style="width:20px;height:20px" aria-hidden="true"></span></div><div class="stat-body"><b id="taskStatTotal">0</b><span>累计消耗 RH 币</span></div></div>
+        <div class="stat-card"><div class="stat-icon green"><span class="icon icon-refresh" style="width:20px;height:20px" aria-hidden="true"></span></div><div class="stat-body"><b id="taskStatUpdated">—</b><span>最近更新时间</span></div></div>
+      </section>
+
+      <div class="task-panel">
+        <div class="task-panel-head">
+          <h2><span class="icon icon-history" style="width:16px;height:16px" aria-hidden="true"></span>最近任务记录<span class="count" id="taskCountLabel"></span></h2>
+          <button class="btn text small" id="taskRefreshBtn"><span class="icon icon-refresh" style="width:14px;height:14px" aria-hidden="true"></span>刷新</button>
+          <button class="btn danger-text small" id="taskClearBtn" disabled><span class="icon icon-delete" style="width:14px;height:14px" aria-hidden="true"></span>清空记录</button>
+        </div>
+        <div class="task-table-head">
+          <div>任务 ID</div>
+          <div>工作流</div>
+          <div style="text-align:right">RH 币消耗</div>
+        </div>
+        <div id="taskList"></div>
+        <div class="task-empty hidden" id="taskEmptyState">
+          <div class="big"><span class="icon icon-history" style="width:28px;height:28px" aria-hidden="true"></span></div>
+          <h3>还没有任务记录</h3>
+          <p>通过插件运行工作流后，成功的任务会记录到这里（任务 ID / 工作流 / RH 币消耗）。</p>
+        </div>
+      </div>
+    </section>
+
 </div>
 
 <dialog id="workflowDialog">
@@ -428,6 +523,18 @@ dialog::backdrop{background:var(--overlay)}
   </div>
 </dialog>
 
+<dialog id="clearTasksDialog">
+  <div class="dialog">
+    <div class="dialog-head"><h3>清空任务记录？</h3></div>
+    <div class="dialog-body"><p id="clearTasksText" style="color:var(--muted);margin:0">这会删除插件保存的最近任务记录，RunningHub 平台上的账单不会受影响。</p></div>
+    <div class="dialog-foot">
+      <button class="btn text" id="clearTasksCancelBtn">取消</button>
+      <button class="btn danger-text" id="clearTasksOkBtn">清空</button>
+    </div>
+  </div>
+</dialog>
+
+
 <div id="toasts"></div>
 
 <script type="module">
@@ -449,6 +556,8 @@ const TYPE_META = {
 
 const state = { workflows: [], templates: [], original: null, dirty: false, saving: false, loading: true, search: "", region: "all" };
 const balanceState = { regions: [], loading: false, updatedAt: "" };
+const taskHistoryState = { records: [], loading: false, loaded: false, updatedAt: "" };
+let currentTab = "workflows";
 let workflowDialogIndex = -1;
 let nodeDialogState = { wf: -1, node: -1 };
 let analyzeState = { wf: -1, nodes: [], method: "" };
@@ -529,6 +638,116 @@ async function loadBalance() {
     balanceState.loading = false;
     if (btn) btn.disabled = false;
     renderBalance();
+  }
+}
+
+function taskCoinValue(value) {
+  const n = Number(String(value ?? "0").replace(/[,\s]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function formatTaskCoins(value) {
+  const n = taskCoinValue(value);
+  if (Number.isInteger(n)) return String(n);
+  return String(Number(n.toFixed(4)));
+}
+function taskNowTime() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+function taskRowMarkup(record) {
+  const taskId = esc(record.task_id || "");
+  const workflow = record.workflow || "";
+  const coins = esc(formatTaskCoins(record.coins));
+  return `<div class="task-row">
+    <div class="task-id" title="点击复制任务 ID" data-copy="${taskId}">${taskId}<span class="copy-hint">复制</span></div>
+    <div class="task-workflow"><span class="chip">${workflow ? esc(workflow) : "未记录工作流"}</span></div>
+    <div class="task-coins"><span class="coin-icon"><span class="icon icon-wallet" style="width:14px;height:14px" aria-hidden="true"></span></span><b>${coins}</b><span>RH 币</span></div>
+  </div>`;
+}
+function renderTaskHistory() {
+  const records = taskHistoryState.records;
+  const total = records.reduce((sum, item) => sum + taskCoinValue(item.coins), 0);
+  $("taskStatCount").textContent = String(records.length);
+  $("taskStatTotal").textContent = formatTaskCoins(total);
+  $("taskStatUpdated").textContent = taskHistoryState.updatedAt || "—";
+  $("taskCountLabel").textContent = records.length ? `共 ${records.length} 条` : "";
+  $("taskList").innerHTML = records.map(taskRowMarkup).join("");
+  $("taskEmptyState").classList.toggle("hidden", records.length > 0);
+  $("taskClearBtn").disabled = taskHistoryState.loading || records.length === 0;
+}
+async function loadTaskHistory() {
+  taskHistoryState.loading = true;
+  $("taskRefreshBtn").disabled = true;
+  renderTaskHistory();
+  try {
+    const res = normalizeApiResponse(await bridge.apiGet("page/tasks"));
+    if (!res || res.success === false) throw new Error(res?.message || "读取任务记录失败");
+    taskHistoryState.records = Array.isArray(res.records) ? res.records.filter((item) => item && item.task_id) : [];
+    taskHistoryState.loaded = true;
+    taskHistoryState.updatedAt = taskNowTime();
+    toast(`已读取 ${taskHistoryState.records.length} 条任务记录`, "ok", 1800);
+  } catch (err) {
+    toast(String(err?.message || err), "err", 6000);
+  } finally {
+    taskHistoryState.loading = false;
+    $("taskRefreshBtn").disabled = false;
+    renderTaskHistory();
+  }
+}
+async function clearTaskHistory() {
+  $("clearTasksDialog").close();
+  $("clearTasksOkBtn").disabled = true;
+  try {
+    const res = normalizeApiResponse(await bridge.apiPost("page/tasks/clear", {}));
+    if (!res || res.success === false) throw new Error(res?.message || "清空失败");
+    taskHistoryState.records = [];
+    taskHistoryState.updatedAt = taskNowTime();
+    renderTaskHistory();
+    toast(res.message || "任务记录已清空", "ok");
+  } catch (err) {
+    toast(String(err?.message || err), "err", 6000);
+  } finally {
+    $("clearTasksOkBtn").disabled = false;
+  }
+}
+async function copyTaskId(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+    toast("任务 ID 已复制", "ok", 1600);
+  } catch {
+    toast("复制失败，请手动选择复制", "err", 2400);
+  }
+}
+function switchTab(tab) {
+  currentTab = tab === "tasks" ? "tasks" : "workflows";
+  document.querySelectorAll(".page-tab").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === currentTab);
+  });
+  $("workflowsPanel").classList.toggle("hidden", currentTab !== "workflows");
+  $("tasksPanel").classList.toggle("hidden", currentTab !== "tasks");
+  const workflowActions = $("workflowActions");
+  if (workflowActions) workflowActions.classList.toggle("hidden", currentTab !== "workflows");
+  if (currentTab === "tasks" && !taskHistoryState.loaded) loadTaskHistory();
+}
+async function refreshCurrentTab() {
+  if (currentTab === "tasks") {
+    await loadTaskHistory();
+    toast("任务记录已刷新", "ok");
+  } else {
+    await Promise.all([loadConfig(), loadBalance()]);
+    toast("配置与余额已刷新", "ok");
   }
 }
 function toast(message, type = "info", duration = 3200) {
@@ -1126,10 +1345,7 @@ $("azResult").addEventListener("change", (event) => {
 $("azReplaceBtn").addEventListener("click", () => applyAnalyze("replace"));
 $("azMergeBtn").addEventListener("click", () => applyAnalyze("merge"));
 $("addWorkflowBtn").addEventListener("click", () => openWorkflowDialog(-1));
-$("refreshBtn").addEventListener("click", async () => {
-  try { await Promise.all([loadConfig(), loadBalance()]); toast("配置与余额已刷新", "ok"); }
-  catch (err) { toast(String(err?.message || err), "err"); }
-});
+$("refreshBtn").addEventListener("click", refreshCurrentTab);
 $("balanceRefreshBtn").addEventListener("click", loadBalance);
 $("saveBtn").addEventListener("click", saveConfig);
 $("wfUploadBtn").addEventListener("click", () => $("wfTemplateFile").click());
@@ -1145,6 +1361,18 @@ $("nodeType").addEventListener("change", updateNodeTypeHint);
 $("nodeField").addEventListener("input", updateNodeTypeHint);
 $("confirmOkBtn").addEventListener("click", () => { $("confirmDialog").close(); if (confirmResolver) confirmResolver(true); confirmResolver = null; });
 $("confirmCancelBtn").addEventListener("click", () => { $("confirmDialog").close(); if (confirmResolver) confirmResolver(false); confirmResolver = null; });
+$("pageTabs").addEventListener("click", (event) => {
+  const tab = event.target.closest(".page-tab")?.dataset?.tab;
+  if (tab) switchTab(tab);
+});
+$("taskRefreshBtn").addEventListener("click", loadTaskHistory);
+$("taskClearBtn").addEventListener("click", () => $("clearTasksDialog").showModal());
+$("taskList").addEventListener("click", (event) => {
+  const target = event.target.closest("[data-copy]");
+  if (target) copyTaskId(target.getAttribute("data-copy"));
+});
+$("clearTasksCancelBtn").addEventListener("click", () => $("clearTasksDialog").close());
+$("clearTasksOkBtn").addEventListener("click", clearTaskHistory);
 
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === "s") {
