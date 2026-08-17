@@ -1390,7 +1390,7 @@ async function init() {
     if (!bridge || typeof bridge.ready !== "function") throw new Error("未检测到 AstrBot Plugin Page Bridge，请从 AstrBot WebUI 的插件页面入口打开本页面。");
     const context = await bridge.ready();
     $("pluginMeta").textContent = context?.displayName || context?.pluginName || "runninghub_workflow_adapter";
-    await Promise.all([loadConfig(), loadTemplates()]);
+    await Promise.all([loadConfig(), loadTemplates(), loadBalance()]);
     toast("已连接插件并读取配置", "ok", 2200);
   } catch (err) {
     state.loading = false;
