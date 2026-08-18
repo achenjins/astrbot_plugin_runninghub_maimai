@@ -1,7 +1,7 @@
 name: runninghub_workflow_adapter
 desc: 调用 RunningHub 工作流出图/视频：文生图、参考图、视频生成、提示词扩写与交互式上传，适配 NapCat / OneBot v11。提供可视化 Pages 管理工作流与输入节点、查询账户余额和最近任务记录，旧版回退动态表单。
 author: 锦瑟
-version: 2.3.2
+version: 2.3.3
 repo: https://github.com/achenjins/astrbot_plugin_runninghub_maimai
 social_link: https://github.com/achenjins
 display_name: 麦麦画师 · RunningHub
