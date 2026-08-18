@@ -1,5 +1,7 @@
 # 麦麦画师 · RunningHub
 
+![running](https://count.kjchmc.cn/get/@rhaajinse?theme=gelbooru)
+
 让 AstrBot 调用 RunningHub 工作流出图、出视频，结果自动发回聊天。
 
 - 文生图 / 图生图 / 文生视频 / 多参考文件工作流
@@ -58,7 +60,7 @@ pip install -r requirements.txt
 
 需要文件时机器人会引导上传；不想传就回「跳过剩余」。
 
-<details>
+<details open>
 <summary>体验工作流（可选）</summary>
 
 这是为第一次试运行准备的文生图工作流，已删除高成本「豆包提示词优化」节点。
