@@ -57,6 +57,8 @@ pip install -r requirements.txt
 
 ### 1. 填写 API Key
 
+使用邀请码注册可得 500 RH 币，下方链接已自动带上邀请码。
+
 | 站点 | 注册 | API Key 页面 |
 | --- | --- | --- |
 | 国内站 | [注册（带邀请码）](https://www.runninghub.cn?inviteCode=8cq8uhl8) | [打开 API Key 页](https://www.runninghub.cn/enterprise-api/consumerApi?inviteCode=8cq8uhl8) |
