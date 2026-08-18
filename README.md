@@ -1,6 +1,6 @@
 # 麦麦画师 · RunningHub
 
-![running](https://count.kjchmc.cn/get/@rhaajinse?theme=gelbooru)
+![running](https://count.kjchmc.cn/get/@astraajinse?theme=gelbooru)
 
 让 AstrBot 调用 RunningHub 工作流出图、出视频，结果自动发回聊天。
 
