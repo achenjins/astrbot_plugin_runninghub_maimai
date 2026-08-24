@@ -1197,3 +1197,35 @@ def test_upload_prompt_file_auto_decodes_common_encodings(
     assert target.read_text(encoding="utf-8") == content
     messages = [item[1].get_plain_text() for item in ctx.sent]
     assert any("已转 UTF-8" in message for message in messages)
+
+
+def test_napcat_file_result_downloads_url_instead_of_decoding_as_base64(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    class FakeClient:
+        async def download_bytes(self, url: str) -> bytes:
+            assert url == "https://files.example.test/text.md"
+            return "# 提示词\n一只猫".encode("utf-8")
+
+    star._client = FakeClient()
+
+    result = asyncio.run(
+        star._extract_bytes_from_napcat_result(
+            {"data": {"file": "https://files.example.test/text.md"}}
+        )
+    )
+    assert result == "# 提示词\n一只猫".encode("utf-8")
+
+
+def test_prompt_file_component_skips_napcat_group_download_url(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    event = FakeEvent(
+        messages=[
+            FileComponent(
+                "text.md",
+                url="https://gzc-download.ftn.qq.com/ftn_handler/bad.zip",
+            )
+        ]
+    )
+    assert asyncio.run(star._extract_prompt_file_from_event(event)) is None

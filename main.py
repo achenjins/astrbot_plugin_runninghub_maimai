@@ -1888,15 +1888,18 @@ class RunningHubGenericPlugin(Star):
             if filename and Path(filename).suffix.lower() not in {".md", ".txt"}:
                 continue
             try:
-                source = await comp.get_file()
-                source = str(source or "").removeprefix("file:///")
-                if not source:
-                    source = str(await comp.get_file(allow_return_url=True) or "").strip()
-                if not source or any(
+                # 先取 URL/本地路径但不下载，避免把 NapCat 的 gzc 直链下载成错误 ZIP。
+                source = str(await comp.get_file(allow_return_url=True) or "").strip()
+                if any(
                     marker in source.lower()
                     for marker in ("gzc-download.ftn.qq.com", "ftn.qq.com")
                 ):
                     continue
+                if not source:
+                    source = str(await comp.get_file() or "").strip()
+                elif source.startswith(("http://", "https://")):
+                    source = str(await comp.get_file() or "").strip()
+                source = source.removeprefix("file:///")
                 if not filename:
                     filename = Path(source.split("?", 1)[0]).name
                 if Path(filename).suffix.lower() not in {".md", ".txt"}:
@@ -2078,6 +2081,16 @@ class RunningHubGenericPlugin(Star):
     def _extract_text_from_event(event: AstrMessageEvent) -> str:
         """从 AstrBot 消息事件提取纯文本内容。"""
         return str(getattr(event, "message_str", "") or "").strip()
+
+    @staticmethod
+    def _is_napcat_group_upload_notice(event: AstrMessageEvent) -> bool:
+        """判断事件是否为 NapCat 群文件通知。"""
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        return bool(
+            isinstance(raw, dict)
+            and str(raw.get("post_type") or "") == "notice"
+            and str(raw.get("notice_type") or "") == "group_upload"
+        )
 
     @staticmethod
     def _is_finish_signal(text: str) -> bool:
@@ -2387,6 +2400,10 @@ class RunningHubGenericPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
     async def handle_input_collector(self, event: AstrMessageEvent) -> None:
         """拦截交互式输入会话中的文件 / 控制词消息，阻止其继续进入 LLM。"""
+        # QQ 群文件会先产生 notice，再产生一条空的 file 消息；放行 notice，
+        # 由后面的 handle_notice_collector 通过 OneBot API 下载真实文件。
+        if self._is_napcat_group_upload_notice(event):
+            return
         user_id = str(event.get_sender_id() or "")
         stream_id = str(event.unified_msg_origin or "")
         interaction = self._prompt_interactions.get(self._session_key(user_id, stream_id))
@@ -2745,16 +2762,43 @@ class RunningHubGenericPlugin(Star):
 
         data = result.get("data")
         if isinstance(data, dict):
-            b64 = str(data.get("file") or data.get("base64") or data.get("data") or "").strip()
-            b64 = b64.removeprefix("base64://")
-            if b64:
-                try:
-                    return self._decode_base64_bounded(b64)
-                except RunningHubError:
-                    raise
-                except Exception:
-                    # 非法 base64 保持原行为：跳过该候选，继续尝试其他字段/API
-                    pass
+            # NapCat 不同版本会把真实文件放在 file/base64/data、URL 或本地路径中。
+            # 只有明确的 base64 值才进入解码，不能把 URL/路径当作 base64 处理。
+            for field_name in ("file", "base64", "data"):
+                candidate = data.get(field_name)
+                if not isinstance(candidate, str):
+                    continue
+                candidate = candidate.strip()
+                if not candidate:
+                    continue
+                if candidate.startswith("base64://"):
+                    try:
+                        return self._decode_base64_bounded(candidate[len("base64://"):])
+                    except RunningHubError:
+                        raise
+                    except Exception:
+                        continue
+                if candidate.startswith(("http://", "https://")):
+                    client = self._client or self._client_cn
+                    if client is not None:
+                        return await client.download_bytes(candidate)
+                    continue
+                local_path = candidate.removeprefix("file:///")
+                path = Path(local_path)
+                if path.is_file():
+                    if path.stat().st_size > _MAX_FILE_BYTES:
+                        raise RunningHubError(
+                            f"本地文件超过 {_MAX_FILE_BYTES} 字节上限: {local_path}"
+                        )
+                    return await asyncio.to_thread(path.read_bytes)
+                # 仅允许 base64/base64 字段携带无前缀编码，避免误解码文件名。
+                if field_name in {"base64", "data"}:
+                    try:
+                        return self._decode_base64_bounded(candidate)
+                    except RunningHubError:
+                        raise
+                    except Exception:
+                        continue
             url = str(data.get("url") or data.get("file_url") or data.get("download_url") or "").strip()
             if url.startswith(("http://", "https://")):
                 client = self._client or self._client_cn
