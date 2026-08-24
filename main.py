@@ -1758,7 +1758,8 @@ class RunningHubGenericPlugin(Star):
         text = self._extract_text_from_event(event).strip()
         key = self._session_key(interaction.user_id, interaction.stream_id)
         stream_id = str(event.unified_msg_origin or interaction.stream_id)
-        if text.startswith("/"):
+        command_text = text.lstrip("/").strip()
+        if text.startswith("/") or command_text == "wf" or command_text.startswith("wf "):
             self._remove_prompt_interaction(key)
             return False
         if text.lower() in {"取消", "退出", "cancel", "quit"}:
@@ -2246,9 +2247,30 @@ class RunningHubGenericPlugin(Star):
             self._mark_handled(event)
             return
 
-    @filter.command("wf")
-    async def handle_prompt_command(self, event: AstrMessageEvent) -> None:
-        """管理和复用扩写提示词。"""
+    @filter.command_group("wf")
+    def prompt_command_group(self) -> None:
+        """提示词缓存与复用命令组。"""
+        pass
+
+    @prompt_command_group.command("保存提示词")
+    async def handle_prompt_save_command(self, event: AstrMessageEvent) -> None:
+        """从最近提示词中选择一条持久保存。"""
+        await self._handle_prompt_command(event, "保存提示词")
+
+    @prompt_command_group.command("提示词重跑")
+    async def handle_prompt_rerun_command(self, event: AstrMessageEvent) -> None:
+        """复用最近一次扩写提示词重新运行。"""
+        await self._handle_prompt_command(event, "提示词重跑")
+
+    @prompt_command_group.command("提示词")
+    async def handle_prompt_list_command(self, event: AstrMessageEvent) -> None:
+        """选择已保存提示词并运行。"""
+        await self._handle_prompt_command(event, "提示词")
+
+    async def _handle_prompt_command(
+        self, event: AstrMessageEvent, action: str
+    ) -> None:
+        """执行提示词命令组的子命令。"""
         if self._is_consumed(event):
             return
         ctx = self._event_ctx(event)
@@ -2258,13 +2280,6 @@ class RunningHubGenericPlugin(Star):
             await self._send_text(stream_id, deny_msg)
             self._mark_handled(event)
             return
-        rest = re.sub(
-            r"^/?wf(?:\s+|[：:，,、]+)",
-            "",
-            str(event.message_str or "").strip(),
-            count=1,
-        ).strip()
-        action = re.sub(r"\s+", "", rest)
         owner_key = self._prompt_owner_key(ctx["user_id"], ctx["platform_id"])
         session_key = self._session_key(ctx["user_id"], stream_id)
 

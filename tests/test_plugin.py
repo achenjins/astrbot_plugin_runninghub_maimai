@@ -1029,7 +1029,7 @@ def test_save_prompt_command_uses_number_then_description(
     }
 
     async def _run() -> None:
-        await star.handle_prompt_command(FakeEvent("/wf 保存提示词"))
+        await star.handle_prompt_save_command(FakeEvent("/wf 保存提示词"))
         await star.handle_input_collector(FakeEvent("1"))
         await star.handle_input_collector(FakeEvent("窗边猫模板"))
 
@@ -1041,3 +1041,51 @@ def test_save_prompt_command_uses_number_then_description(
     assert any("一只窗边的猫" in message for message in messages)
     assert any("请发送这条提示词的保存描述" in message for message in messages)
     assert any("已保存提示词：窗边猫模板" in message for message in messages)
+
+
+def test_prompt_commands_are_registered_as_astrbot_command_group() -> None:
+    from astrbot.core.star.filter.command import CommandFilter
+    from astrbot.core.star.filter.command_group import CommandGroupFilter
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    handlers = {handler.handler_name: handler for handler in star_handlers_registry}
+    group = handlers["prompt_command_group"]
+    assert any(isinstance(item, CommandGroupFilter) for item in group.event_filters)
+
+    expected = {
+        "handle_prompt_save_command": "wf 保存提示词",
+        "handle_prompt_rerun_command": "wf 提示词重跑",
+        "handle_prompt_list_command": "wf 提示词",
+    }
+    for handler_name, command_name in expected.items():
+        handler = handlers[handler_name]
+        command_filter = next(
+            item for item in handler.event_filters if isinstance(item, CommandFilter)
+        )
+        assert command_filter.get_complete_command_names() == [command_name]
+        assert handler.extras_configs.get("sub_command") is True
+
+
+def test_prompt_command_can_interrupt_existing_prompt_interaction(
+    star: plugin_main.RunningHubGenericPlugin,
+) -> None:
+    """WakingCheckStage 会先去掉 /，新命令仍须优先于旧的数字交互。"""
+    stream_id = "fake:group_message:20001"
+    key = star._session_key("10001", stream_id)
+    event = FakeEvent("wf 提示词")
+
+    async def _run() -> None:
+        star._register_prompt_interaction(
+            plugin_main.PromptInteraction(
+                user_id="10001",
+                stream_id=stream_id,
+                owner_key="fake:10001",
+                phase="save_select",
+                entries=[{"original_prompt": "测试提示词"}],
+            )
+        )
+        await star.handle_input_collector(event)
+
+    asyncio.run(_run())
+    assert key not in star._prompt_interactions
+    assert star._is_consumed(event) is False
