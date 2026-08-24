@@ -14,6 +14,7 @@ if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
 
 from astrbot.core.config.astrbot_config import AstrBotConfig  # noqa: E402
+from astrbot.api.message_components import File as FileComponent  # noqa: E402
 
 import main as plugin_main  # noqa: E402
 from rh_generic_lib.delivery import Delivery, DeliveryTarget  # noqa: E402
@@ -48,11 +49,18 @@ class FakeContext:
 
 
 class FakeEvent:
-    def __init__(self, text: str = "", user_id: str = "10001", group_id: str = "20001") -> None:
+    def __init__(
+        self,
+        text: str = "",
+        user_id: str = "10001",
+        group_id: str = "20001",
+        messages: list[Any] | None = None,
+    ) -> None:
         self.message_str = text
         self._user_id = user_id
         self._group_id = group_id
         self._platform_id = "fake"
+        self._messages = messages or []
         self._extras: dict[str, Any] = {}
         self.call_llm = False
 
@@ -70,7 +78,7 @@ class FakeEvent:
         return self._platform_id
 
     def get_messages(self) -> list:
-        return []
+        return self._messages
 
     def get_extra(self, key: str, default: Any = None) -> Any:
         return self._extras.get(key, default)
@@ -1056,6 +1064,7 @@ def test_prompt_commands_are_registered_as_astrbot_command_group() -> None:
         "handle_prompt_save_command": "wf 保存提示词",
         "handle_prompt_rerun_command": "wf 提示词重跑",
         "handle_prompt_list_command": "wf 提示词",
+        "handle_prompt_upload_command": "wf 上传提示词",
     }
     for handler_name, command_name in expected.items():
         handler = handlers[handler_name]
@@ -1089,3 +1098,98 @@ def test_prompt_command_can_interrupt_existing_prompt_interaction(
     asyncio.run(_run())
     assert key not in star._prompt_interactions
     assert star._is_consumed(event) is False
+
+
+def test_saved_prompt_list_can_delete_by_number(
+    ctx: FakeContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    star = plugin_main.RunningHubGenericPlugin(ctx, None)
+    owner_key = star._prompt_owner_key("10001", "fake")
+    entries = [
+        {
+            "workflow_name": "工作流一",
+            "workflow_id": "1",
+            "region": "overseas",
+            "original_prompt": "原描述一",
+            "enhanced_prompt": "扩写一",
+            "description": "第一个",
+            "created_at": 1.0,
+            "saved_at": 3.0,
+        },
+        {
+            "workflow_name": "工作流二",
+            "workflow_id": "2",
+            "region": "overseas",
+            "original_prompt": "原描述二",
+            "enhanced_prompt": "扩写二",
+            "description": "第二个",
+            "created_at": 2.0,
+            "saved_at": 3.0,
+        },
+    ]
+    star._prompt_library[owner_key] = {"recent": [], "saved": entries}
+
+    async def _run() -> None:
+        await star.handle_prompt_list_command(FakeEvent("/wf 提示词"))
+        await star.handle_input_collector(FakeEvent("删除1"))
+
+    asyncio.run(_run())
+    saved = star._prompt_entries(owner_key, "saved")
+    assert [item["description"] for item in saved] == ["第二个"]
+    messages = [item[1].get_plain_text() for item in ctx.sent]
+    assert any("已删除：第一个" in message for message in messages)
+    assert any("第二个" in message and "回复数字运行" in message for message in messages)
+
+
+def test_upload_prompt_file_command_saves_txt_template(
+    ctx: FakeContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    star = plugin_main.RunningHubGenericPlugin(ctx, None)
+    source = tmp_path / "my_prompt.md"
+    source.write_text("# prompt\n描写一只雨夜的猫", encoding="utf-8")
+    file_event = FakeEvent(
+        messages=[FileComponent("my_prompt.md", file=str(source))],
+    )
+
+    async def _run() -> None:
+        await star.handle_prompt_upload_command(FakeEvent("/wf 上传提示词"))
+        await star.handle_input_collector(file_event)
+
+    asyncio.run(_run())
+    target = star._prompt_templates_dir() / "my_prompt.md"
+    assert target.read_text(encoding="utf-8") == "# prompt\n描写一只雨夜的猫"
+    messages = [item[1].get_plain_text() for item in ctx.sent]
+    assert any("提示词模板已上传：my_prompt.md" in message for message in messages)
+
+
+@pytest.mark.parametrize("encoding", ["gb18030", "utf-16"])
+def test_upload_prompt_file_auto_decodes_common_encodings(
+    ctx: FakeContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    star = plugin_main.RunningHubGenericPlugin(ctx, None)
+    content = "# 提示词\n描写一只雨夜的猫"
+    filename = f"encoded_{encoding.replace('-', '_')}.txt"
+    source = tmp_path / filename
+    source.write_bytes(content.encode(encoding))
+
+    async def _run() -> None:
+        await star.handle_prompt_upload_command(FakeEvent("/wf 上传提示词"))
+        await star.handle_input_collector(
+            FakeEvent(messages=[FileComponent(filename, file=str(source))])
+        )
+
+    asyncio.run(_run())
+    target = star._prompt_templates_dir() / filename
+    assert target.read_text(encoding="utf-8") == content
+    messages = [item[1].get_plain_text() for item in ctx.sent]
+    assert any("已转 UTF-8" in message for message in messages)

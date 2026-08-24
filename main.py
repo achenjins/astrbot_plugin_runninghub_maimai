@@ -13,7 +13,7 @@
 
 命令：
 - /wf运行 <工作流名> [描述文本]
-- /wf 保存提示词 / /wf 提示词重跑 / /wf 提示词
+- /wf 保存提示词 / /wf 提示词重跑 / /wf 提示词 / /wf 上传提示词
 - /wf工作流
 - /wf国外工作流 <工作流ID> [名称] / /wf国内工作流 <工作流ID> [名称]
 - /wf详细国外工作流 <工作流ID> [名称] / /wf详细国内工作流 <工作流ID> [名称]
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import hashlib
 import importlib
 import json
@@ -112,6 +113,7 @@ _TASK_HISTORY_FIELDS = ("task_id", "workflow", "coins")
 # 提示词缓存：最近运行每个用户只保留 5 条，手动保存的提示词长期保留。
 _PROMPT_LIBRARY_FILE = "prompt_library.json"
 _RECENT_PROMPT_MAX = 5
+_PROMPT_TEMPLATE_MAX_BYTES = 2 * 1024 * 1024
 
 # 交互收集会话中，用于"跳过剩余文件、直接开始运行"的触发词
 _FINISH_KEYWORDS = {
@@ -1362,8 +1364,7 @@ class RunningHubGenericPlugin(Star):
         if not files:
             await self._send_text(
                 stream_id,
-                "未识别到图片、语音或视频文件，请直接发送文件（不要带文字）；"
-                "或发送「跳过剩余」直接开始运行",
+                "请发送图片/语音/视频，或回复“跳过剩余”",
             )
             return True
 
@@ -1447,7 +1448,7 @@ class RunningHubGenericPlugin(Star):
             if session.waiting_nodes:
                 await self._send_text(
                     stream_id,
-                    f"已收到，还剩余：{self._build_waiting_tips_from_dicts(session.waiting_nodes)}（或发「跳过剩余」）",
+                    f"已收，还需：{self._build_waiting_tips_from_dicts(session.waiting_nodes)}（或“跳过剩余”）",
                 )
                 return True
 
@@ -1462,7 +1463,7 @@ class RunningHubGenericPlugin(Star):
         prefix = f"{notice}。" if notice else ""
         await self._send_text(
             stream_id,
-            f"{prefix}可修改：\n{tips}\n（回复新值，如「512 16:9」，- 保持默认，「不变」全默认）",
+            f"{prefix}可改：\n{tips}\n回复新值；“-”默认，“不变”全默认",
         )
 
     async def _after_files_collected(
@@ -1478,7 +1479,7 @@ class RunningHubGenericPlugin(Star):
             session.phase = "text"
             await self._send_text(
                 stream_id,
-                f"{notice}。请补充描述文本（将填入提示词节点，直接发送文字即可）：",
+                f"{notice}。请发送描述文本：",
             )
             return
         if session.editable_nodes:
@@ -1521,15 +1522,15 @@ class RunningHubGenericPlugin(Star):
             if await self._extract_files_from_event(event):
                 await self._send_text(
                     stream_id,
-                    "现在是描述输入阶段，请先发送要生成的内容文字；参考文件等描述确认后再传",
+                    "请先发送描述文本，文件稍后再传",
                 )
             else:
-                await self._send_text(stream_id, "请直接发送要生成的描述文本（例如：一只在窗边的猫）")
+                await self._send_text(stream_id, "请发送描述文本，例如：一只窗边的猫")
             return
         if self._is_finish_signal(text):
             await self._send_text(
                 stream_id,
-                "该工作流需要描述文本才能运行，不能跳过；请直接发送要生成的内容",
+                "需要描述文本，不能跳过；请直接发送内容",
             )
             return
 
@@ -1556,7 +1557,7 @@ class RunningHubGenericPlugin(Star):
         if not text.strip() and await self._extract_files_from_event(event):
             await self._send_text(
                 stream_id,
-                "现在是配置确认阶段，请回复数值（如「512 16:9」）或「不变」；图片等参考文件请留到下次任务再传",
+                "请回复配置值（如“512 16:9”）或“不变”",
             )
             return
         values = self._parse_config_edit(text, len(session.editable_nodes))
@@ -1751,10 +1752,150 @@ class RunningHubGenericPlugin(Star):
         choice = int(text)
         return choice - 1 if 1 <= choice <= count else None
 
+    @staticmethod
+    def _parse_prompt_delete_choice(text: str, count: int) -> int | None:
+        """解析保存列表中的删除指令，例如「删除1」或「删除 1」。"""
+        match = re.fullmatch(r"(?:删除|刪除|删|刪)\s*(\d+)", str(text or "").strip())
+        if match is None:
+            return None
+        choice = int(match.group(1))
+        return choice - 1 if 1 <= choice <= count else None
+
+    @staticmethod
+    def _saved_prompt_menu(entries: list[dict[str, Any]]) -> str:
+        """构建已保存提示词的短列表。"""
+        lines = ["已保存提示词："]
+        for index, entry in enumerate(entries, 1):
+            description = RunningHubGenericPlugin._prompt_summary(
+                str(entry.get("description") or ""), 80
+            )
+            lines.append(f"{index}. {description} [{entry.get('workflow_name') or '未知工作流'}]")
+        lines.append("回复数字运行，删除+数字删除，或取消")
+        return "\n".join(lines)
+
+    async def _delete_saved_prompt_entry(
+        self, owner_key: str, entry: dict[str, Any]
+    ) -> bool:
+        """从持久保存列表删除一条提示词。"""
+        async with self._prompt_library_lock:
+            owner = self._prompt_library.get(owner_key)
+            saved = owner.get("saved", []) if owner else []
+            for index, item in enumerate(saved):
+                same_content = (
+                    item.get("workflow_id") == entry.get("workflow_id")
+                    and item.get("region") == entry.get("region")
+                    and item.get("enhanced_prompt") == entry.get("enhanced_prompt")
+                )
+                if not same_content:
+                    continue
+                saved.pop(index)
+                try:
+                    await asyncio.to_thread(self._write_prompt_library_file)
+                except OSError as exc:  # pragma: no cover
+                    self.logger.warning("[提示词] 写入删除结果失败: %s", exc)
+                return True
+        return False
+
+    async def _finish_prompt_file_upload(
+        self,
+        interaction: PromptInteraction,
+        filename: str,
+        file_data: bytes,
+    ) -> bool:
+        """校验并保存聊天中上传的提示词模板文件。"""
+        key = self._session_key(interaction.user_id, interaction.stream_id)
+        try:
+            if len(file_data) > _PROMPT_TEMPLATE_MAX_BYTES:
+                raise ValueError("文件不能超过 2MB")
+            content, source_encoding = self._decode_prompt_template_bytes(file_data)
+            content = content.replace("\r\n", "\n").replace("\r", "\n")
+            if not content.strip():
+                raise ValueError("文件内容不能为空")
+            target = self._safe_prompt_template(Path(filename).name)
+            if target is None:
+                raise ValueError("仅支持 .md 或 .txt 文件")
+            existed = target.exists()
+            await asyncio.to_thread(target.write_text, content, encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            await self._send_text(interaction.stream_id, f"上传失败：{exc}")
+            return True
+        self._remove_prompt_interaction(key)
+        suffix = "（已覆盖）" if existed else ""
+        if source_encoding != "UTF-8":
+            suffix += "（已转 UTF-8）"
+        await self._send_text(interaction.stream_id, f"提示词模板已上传：{target.name}{suffix}")
+        return True
+
+    @staticmethod
+    def _decode_prompt_template_bytes(file_data: bytes) -> tuple[str, str]:
+        """识别常见文本编码，并返回统一写入 UTF-8 的文本。"""
+        if file_data.startswith(codecs.BOM_UTF8):
+            return file_data.decode("utf-8-sig"), "UTF-8"
+        if file_data.startswith(codecs.BOM_UTF32_LE) or file_data.startswith(codecs.BOM_UTF32_BE):
+            return file_data.decode("utf-32"), "UTF-32"
+        if file_data.startswith(codecs.BOM_UTF16_LE) or file_data.startswith(codecs.BOM_UTF16_BE):
+            return file_data.decode("utf-16"), "UTF-16"
+
+        try:
+            return file_data.decode("utf-8"), "UTF-8"
+        except UnicodeDecodeError:
+            pass
+
+        # 无 BOM 的 UTF-16 文本通常含有大量 NUL 字节，先尝试按其端序解码。
+        if b"\x00" in file_data[:256]:
+            for encoding in ("utf-16-le", "utf-16-be"):
+                try:
+                    return file_data.decode(encoding), "UTF-16"
+                except UnicodeDecodeError:
+                    continue
+
+        # GB18030 是 GBK 的超集，可覆盖 Windows 中文编辑器常见的 ANSI 文件。
+        for encoding in ("gb18030", "big5"):
+            try:
+                return file_data.decode(encoding), encoding.upper()
+            except UnicodeDecodeError:
+                continue
+        raise UnicodeDecodeError(
+            "prompt-template",
+            file_data,
+            0,
+            min(len(file_data), 1),
+            "无法识别文件编码，请另存为文本文件后重试",
+        )
+
+    async def _extract_prompt_file_from_event(
+        self, event: AstrMessageEvent
+    ) -> tuple[str, bytes] | None:
+        """从聊天消息中读取第一个 .md/.txt 文件。"""
+        for comp in event.get_messages():
+            if not isinstance(comp, FileComponent):
+                continue
+            filename = str(getattr(comp, "name", "") or "").strip()
+            if filename and Path(filename).suffix.lower() not in {".md", ".txt"}:
+                continue
+            try:
+                source = await comp.get_file()
+                source = str(source or "").removeprefix("file:///")
+                if not source:
+                    source = str(await comp.get_file(allow_return_url=True) or "").strip()
+                if not source or any(
+                    marker in source.lower()
+                    for marker in ("gzc-download.ftn.qq.com", "ftn.qq.com")
+                ):
+                    continue
+                if not filename:
+                    filename = Path(source.split("?", 1)[0]).name
+                if Path(filename).suffix.lower() not in {".md", ".txt"}:
+                    continue
+                return filename, await self._fetch_file_bytes(source)
+            except Exception as exc:
+                self.logger.warning("读取提示词文件失败: %s", exc)
+        return None
+
     async def _handle_prompt_interaction(
         self, interaction: PromptInteraction, event: AstrMessageEvent
     ) -> bool:
-        """消费保存描述或提示词编号选择消息。"""
+        """消费保存描述、提示词选择或模板文件消息。"""
         text = self._extract_text_from_event(event).strip()
         key = self._session_key(interaction.user_id, interaction.stream_id)
         stream_id = str(event.unified_msg_origin or interaction.stream_id)
@@ -1767,28 +1908,56 @@ class RunningHubGenericPlugin(Star):
             await self._send_text(stream_id, "已取消提示词操作")
             return True
 
+        if interaction.phase == "upload_file":
+            uploaded = await self._extract_prompt_file_from_event(event)
+            if uploaded is None:
+                await self._send_text(stream_id, "请发送 .md 或 .txt 文件，或回复取消")
+                return True
+            await self._finish_prompt_file_upload(interaction, *uploaded)
+            return True
+
         if interaction.phase == "save_description":
             if not text:
-                await self._send_text(stream_id, "请发送一段文字作为保存描述，或回复“取消”")
+                await self._send_text(stream_id, "请发送保存描述，或取消")
                 return True
             if len(text) > 100:
-                await self._send_text(stream_id, "保存描述不能超过 100 个字符，请重新发送")
+                await self._send_text(stream_id, "保存描述最多 100 字")
                 return True
             selected = interaction.selected
             if selected is None:
                 self._remove_prompt_interaction(key)
-                await self._send_text(stream_id, "待保存提示词已失效，请重新输入 /wf 保存提示词")
+                await self._send_text(stream_id, "记录已失效，请重新输入 /wf 保存提示词")
                 return True
             await self._save_prompt_entry(interaction.owner_key, selected, text)
             self._remove_prompt_interaction(key)
             await self._send_text(stream_id, f"已保存提示词：{text}")
             return True
 
+        delete_choice = self._parse_prompt_delete_choice(text, len(interaction.entries))
+        if interaction.phase == "run_select" and delete_choice is not None:
+            selected = interaction.entries[delete_choice]
+            deleted = await self._delete_saved_prompt_entry(interaction.owner_key, selected)
+            if not deleted:
+                await self._send_text(stream_id, "提示词已不存在，请重新输入 /wf 提示词")
+                self._remove_prompt_interaction(key)
+                return True
+            remaining = self._prompt_entries(interaction.owner_key, "saved")
+            if remaining:
+                interaction.entries = remaining
+                await self._send_text(
+                    stream_id,
+                    f"已删除：{selected.get('description') or '未命名'}\n{self._saved_prompt_menu(remaining)}",
+                )
+            else:
+                self._remove_prompt_interaction(key)
+                await self._send_text(stream_id, "已删除，暂无保存的提示词")
+            return True
+
         choice = self._parse_prompt_choice(text, len(interaction.entries))
         if choice is None:
             await self._send_text(
                 stream_id,
-                f"请回复 1-{len(interaction.entries)} 的数字，或回复“取消”",
+                f"请回复 1-{len(interaction.entries)}，或取消",
             )
             return True
         selected = interaction.entries[choice]
@@ -1797,7 +1966,7 @@ class RunningHubGenericPlugin(Star):
             interaction.phase = "save_description"
             await self._send_text(
                 stream_id,
-                "请发送这条提示词的保存描述（例如：雨夜霓虹猫），或回复“取消”",
+                "请发送这条提示词的保存描述（例：雨夜霓虹猫），或取消",
             )
             return True
 
@@ -2267,6 +2436,11 @@ class RunningHubGenericPlugin(Star):
         """选择已保存提示词并运行。"""
         await self._handle_prompt_command(event, "提示词")
 
+    @prompt_command_group.command("上传提示词")
+    async def handle_prompt_upload_command(self, event: AstrMessageEvent) -> None:
+        """接收并保存一个 .md/.txt 扩写提示词模板。"""
+        await self._handle_prompt_command(event, "上传提示词")
+
     async def _handle_prompt_command(
         self, event: AstrMessageEvent, action: str
     ) -> None:
@@ -2286,13 +2460,13 @@ class RunningHubGenericPlugin(Star):
         if action == "保存提示词":
             entries = self._prompt_entries(owner_key, "recent")[:_RECENT_PROMPT_MAX]
             if not entries:
-                await self._send_text(stream_id, "还没有可保存的最近提示词，请先运行一次带描述的工作流")
+                await self._send_text(stream_id, "暂无最近提示词，请先运行一次工作流")
             else:
-                lines = ["最近运行的提示词（显示扩写前描述）："]
+                lines = ["最近提示词（原描述）："]
                 for index, entry in enumerate(entries, 1):
                     summary = self._prompt_summary(str(entry.get("original_prompt") or ""))
                     lines.append(f"{index}. [{entry['workflow_name']}] {summary}")
-                lines.append("回复数字选择要持久保存的提示词，或回复“取消”")
+                lines.append("回复数字保存，或取消")
                 self._register_prompt_interaction(
                     PromptInteraction(
                         user_id=ctx["user_id"],
@@ -2306,7 +2480,7 @@ class RunningHubGenericPlugin(Star):
         elif action == "提示词重跑":
             entries = self._prompt_entries(owner_key, "recent")
             if not entries:
-                await self._send_text(stream_id, "还没有最近运行的提示词，无法重跑")
+                await self._send_text(stream_id, "暂无最近提示词，无法重跑")
             else:
                 self._remove_prompt_interaction(session_key)
                 self._cancel_input_session(session_key)
@@ -2315,15 +2489,8 @@ class RunningHubGenericPlugin(Star):
         elif action == "提示词":
             entries = self._prompt_entries(owner_key, "saved")
             if not entries:
-                await self._send_text(
-                    stream_id, "还没有保存的提示词，可先输入 /wf 保存提示词 从最近记录中保存"
-                )
+                await self._send_text(stream_id, "暂无保存提示词，请先用 /wf 保存提示词")
             else:
-                lines = ["已保存的提示词："]
-                for index, entry in enumerate(entries, 1):
-                    description = self._prompt_summary(str(entry.get("description") or ""), 80)
-                    lines.append(f"{index}. {description} [{entry['workflow_name']}]")
-                lines.append("回复数字选择并按提示重新上传文件/修改参数，或回复“取消”")
                 self._register_prompt_interaction(
                     PromptInteraction(
                         user_id=ctx["user_id"],
@@ -2333,14 +2500,25 @@ class RunningHubGenericPlugin(Star):
                         entries=entries,
                     )
                 )
-                await self._send_text(stream_id, "\n".join(lines))
+                await self._send_text(stream_id, self._saved_prompt_menu(entries))
+        elif action == "上传提示词":
+            self._register_prompt_interaction(
+                PromptInteraction(
+                    user_id=ctx["user_id"],
+                    stream_id=stream_id,
+                    owner_key=owner_key,
+                    phase="upload_file",
+                )
+            )
+            await self._send_text(stream_id, "请发送 .md 或 .txt 提示词文件，或回复取消")
         else:
             await self._send_text(
                 stream_id,
                 "提示词命令：\n"
-                "/wf 保存提示词 - 从最近 5 条中选择并保存\n"
-                "/wf 提示词重跑 - 复用最近一次提示词\n"
-                "/wf 提示词 - 选择已保存提示词运行",
+                "/wf 保存提示词：保存最近记录\n"
+                "/wf 提示词重跑：重跑最近记录\n"
+                "/wf 提示词：运行或删除已保存记录\n"
+                "/wf 上传提示词：上传 .md/.txt 模板",
             )
         self._mark_handled(event)
 
@@ -2456,6 +2634,22 @@ class RunningHubGenericPlugin(Star):
         group_id = str(raw.get("group_id") or "").strip()
         user_id = str(raw.get("user_id") or "").strip()
         stream_id = str(event.unified_msg_origin or "")
+        interaction = self._prompt_interactions.get(self._session_key(user_id, stream_id))
+        if interaction is not None and interaction.phase == "upload_file":
+            if Path(filename).suffix.lower() not in {".md", ".txt"}:
+                await self._send_text(stream_id, "请发送 .md 或 .txt 提示词文件")
+                self._mark_handled(event)
+                return
+            try:
+                file_data = await self._fetch_napcat_file_bytes(file_id, group_id, event=event)
+            except Exception as exc:
+                self.logger.error("获取提示词文件失败: %s", exc)
+                await self._send_text(stream_id, f"获取文件失败：{exc}")
+                self._mark_handled(event)
+                return
+            await self._finish_prompt_file_upload(interaction, filename, file_data)
+            self._mark_handled(event)
+            return
         session = self._find_input_session(user_id, stream_id)
         if session is None:
             return
