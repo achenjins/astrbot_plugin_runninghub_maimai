@@ -1065,6 +1065,7 @@ def test_prompt_commands_are_registered_as_astrbot_command_group() -> None:
         "handle_prompt_rerun_command": "wf 提示词重跑",
         "handle_prompt_list_command": "wf 提示词",
         "handle_prompt_upload_command": "wf 上传提示词",
+        "handle_prompt_upload_template_command": "wf 上传提示词模板",
     }
     for handler_name, command_name in expected.items():
         handler = handlers[handler_name]
@@ -1158,7 +1159,7 @@ def test_upload_prompt_file_command_saves_txt_template(
     )
 
     async def _run() -> None:
-        await star.handle_prompt_upload_command(FakeEvent("/wf 上传提示词"))
+        await star.handle_prompt_upload_template_command(FakeEvent("/wf 上传提示词模板"))
         await star.handle_input_collector(file_event)
 
     asyncio.run(_run())
@@ -1166,6 +1167,45 @@ def test_upload_prompt_file_command_saves_txt_template(
     assert target.read_text(encoding="utf-8") == "# prompt\n描写一只雨夜的猫"
     messages = [item[1].get_plain_text() for item in ctx.sent]
     assert any("提示词模板已上传：my_prompt.md" in message for message in messages)
+
+
+def test_upload_prompt_file_adds_saved_prompt_for_selected_workflow(
+    ctx: FakeContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    star = plugin_main.RunningHubGenericPlugin(ctx, None)
+    star._workflows = [
+        plugin_main.WorkflowItemSection(
+            name="工作流一", workflow_id="1", region="overseas"
+        ),
+        plugin_main.WorkflowItemSection(
+            name="工作流二", workflow_id="2", region="domestic"
+        ),
+    ]
+    source = tmp_path / "rainy_cat.md"
+    source.write_text("# prompt\n描写一只雨夜的猫", encoding="utf-8")
+
+    async def _run() -> None:
+        await star.handle_prompt_upload_command(FakeEvent("/wf 上传提示词"))
+        await star.handle_input_collector(FakeEvent("2"))
+        await star.handle_input_collector(
+            FakeEvent(messages=[FileComponent("rainy_cat.md", file=str(source))])
+        )
+        await star.handle_prompt_list_command(FakeEvent("/wf 提示词"))
+
+    asyncio.run(_run())
+    owner_key = star._prompt_owner_key("10001", "fake")
+    saved = star._prompt_entries(owner_key, "saved")
+    assert len(saved) == 1
+    assert saved[0]["description"] == "rainy_cat"
+    assert saved[0]["workflow_name"] == "工作流二"
+    assert saved[0]["region"] == "domestic"
+    assert saved[0]["enhanced_prompt"] == "# prompt\n描写一只雨夜的猫"
+    messages = [item[1].get_plain_text() for item in ctx.sent]
+    assert any("已加入提示词：rainy_cat" in message for message in messages)
+    assert any("rainy_cat" in message and "回复数字运行" in message for message in messages)
 
 
 @pytest.mark.parametrize("encoding", ["gb18030", "big5", "utf-16"])
@@ -1187,7 +1227,7 @@ def test_upload_prompt_file_auto_decodes_common_encodings(
     source.write_bytes(content.encode(encoding))
 
     async def _run() -> None:
-        await star.handle_prompt_upload_command(FakeEvent("/wf 上传提示词"))
+        await star.handle_prompt_upload_template_command(FakeEvent("/wf 上传提示词模板"))
         await star.handle_input_collector(
             FakeEvent(messages=[FileComponent(filename, file=str(source))])
         )

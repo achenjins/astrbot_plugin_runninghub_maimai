@@ -13,7 +13,8 @@
 
 命令：
 - /wf运行 <工作流名> [描述文本]
-- /wf 保存提示词 / /wf 提示词重跑 / /wf 提示词 / /wf 上传提示词
+- /wf 保存提示词 / /wf 提示词重跑 / /wf 提示词
+- /wf 上传提示词 / /wf 上传提示词模板
 - /wf工作流
 - /wf国外工作流 <工作流ID> [名称] / /wf国内工作流 <工作流ID> [名称]
 - /wf详细国外工作流 <工作流ID> [名称] / /wf详细国内工作流 <工作流ID> [名称]
@@ -1810,12 +1811,7 @@ class RunningHubGenericPlugin(Star):
         """校验并保存聊天中上传的提示词模板文件。"""
         key = self._session_key(interaction.user_id, interaction.stream_id)
         try:
-            if len(file_data) > _PROMPT_TEMPLATE_MAX_BYTES:
-                raise ValueError("文件不能超过 2MB")
-            content, source_encoding = self._decode_prompt_template_bytes(file_data)
-            content = content.replace("\r\n", "\n").replace("\r", "\n")
-            if not content.strip():
-                raise ValueError("文件内容不能为空")
+            content, source_encoding = self._decode_prompt_file_content(file_data)
             target = self._safe_prompt_template(Path(filename).name)
             if target is None:
                 raise ValueError("仅支持 .md 或 .txt 文件")
@@ -1830,6 +1826,55 @@ class RunningHubGenericPlugin(Star):
             suffix += "（已转 UTF-8）"
         await self._send_text(interaction.stream_id, f"提示词模板已上传：{target.name}{suffix}")
         return True
+
+    async def _finish_uploaded_prompt(
+        self,
+        interaction: PromptInteraction,
+        filename: str,
+        file_data: bytes,
+    ) -> bool:
+        """把上传文件作为一条可在「/wf 提示词」中运行的记录保存。"""
+        key = self._session_key(interaction.user_id, interaction.stream_id)
+        try:
+            content, source_encoding = self._decode_prompt_file_content(file_data)
+            workflow = interaction.selected or {}
+            workflow_name = str(workflow.get("workflow_name") or "").strip()
+            workflow_id = str(workflow.get("workflow_id") or "").strip()
+            if not workflow_name:
+                raise ValueError("未选择工作流")
+            description = Path(filename).stem.strip(" ._-") or "上传提示词"
+            entry = {
+                "workflow_name": workflow_name,
+                "workflow_id": workflow_id,
+                "region": str(workflow.get("region") or "overseas").strip() or "overseas",
+                "original_prompt": content,
+                "enhanced_prompt": content,
+                "description": description,
+                "created_at": time.time(),
+                "saved_at": 0.0,
+            }
+            await self._save_prompt_entry(interaction.owner_key, entry, description)
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            await self._send_text(interaction.stream_id, f"上传失败：{exc}")
+            return True
+        self._remove_prompt_interaction(key)
+        suffix = "（已转 UTF-8）" if source_encoding != "UTF-8" else ""
+        await self._send_text(
+            interaction.stream_id,
+            f"已加入提示词：{description} [{workflow_name}]{suffix}",
+        )
+        return True
+
+    @staticmethod
+    def _decode_prompt_file_content(file_data: bytes) -> tuple[str, str]:
+        """限制、解码并规范化上传的提示词文本。"""
+        if len(file_data) > _PROMPT_TEMPLATE_MAX_BYTES:
+            raise ValueError("文件不能超过 2MB")
+        content, source_encoding = RunningHubGenericPlugin._decode_prompt_template_bytes(file_data)
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        if not content.strip():
+            raise ValueError("文件内容不能为空")
+        return content, source_encoding
 
     @staticmethod
     def _decode_prompt_template_bytes(file_data: bytes) -> tuple[str, str]:
@@ -1925,12 +1970,25 @@ class RunningHubGenericPlugin(Star):
             await self._send_text(stream_id, "已取消提示词操作")
             return True
 
-        if interaction.phase == "upload_file":
+        if interaction.phase in {"upload_template_file", "upload_prompt_file"}:
             uploaded = await self._extract_prompt_file_from_event(event)
             if uploaded is None:
                 await self._send_text(stream_id, "请发送 .md 或 .txt 文件，或回复取消")
                 return True
-            await self._finish_prompt_file_upload(interaction, *uploaded)
+            if interaction.phase == "upload_template_file":
+                await self._finish_prompt_file_upload(interaction, *uploaded)
+            else:
+                await self._finish_uploaded_prompt(interaction, *uploaded)
+            return True
+
+        if interaction.phase == "upload_prompt_workflow":
+            choice = self._parse_prompt_choice(text, len(interaction.entries))
+            if choice is None:
+                await self._send_text(stream_id, f"请回复 1-{len(interaction.entries)}，或取消")
+                return True
+            interaction.selected = dict(interaction.entries[choice])
+            interaction.phase = "upload_prompt_file"
+            await self._send_text(stream_id, "请发送 .md 或 .txt 提示词文件，或取消")
             return True
 
         if interaction.phase == "save_description":
@@ -2469,8 +2527,13 @@ class RunningHubGenericPlugin(Star):
 
     @prompt_command_group.command("上传提示词")
     async def handle_prompt_upload_command(self, event: AstrMessageEvent) -> None:
-        """接收并保存一个 .md/.txt 扩写提示词模板。"""
+        """上传一条可在「/wf 提示词」中选择运行的提示词。"""
         await self._handle_prompt_command(event, "上传提示词")
+
+    @prompt_command_group.command("上传提示词模板")
+    async def handle_prompt_upload_template_command(self, event: AstrMessageEvent) -> None:
+        """上传并保存一个 .md/.txt 扩写提示词模板。"""
+        await self._handle_prompt_command(event, "上传提示词模板")
 
     async def _handle_prompt_command(
         self, event: AstrMessageEvent, action: str
@@ -2533,15 +2596,55 @@ class RunningHubGenericPlugin(Star):
                 )
                 await self._send_text(stream_id, self._saved_prompt_menu(entries))
         elif action == "上传提示词":
+            workflows = [
+                {
+                    "workflow_name": workflow.name,
+                    "workflow_id": workflow.workflow_id,
+                    "region": workflow.region,
+                }
+                for workflow in self._workflows
+                if str(workflow.name or "").strip()
+            ]
+            if not workflows:
+                await self._send_text(stream_id, "暂无可用工作流，请先配置工作流")
+            elif len(workflows) == 1:
+                self._register_prompt_interaction(
+                    PromptInteraction(
+                        user_id=ctx["user_id"],
+                        stream_id=stream_id,
+                        owner_key=owner_key,
+                        phase="upload_prompt_file",
+                        selected=workflows[0],
+                    )
+                )
+                await self._send_text(stream_id, "请发送 .md 或 .txt 提示词文件，或取消")
+            else:
+                self._register_prompt_interaction(
+                    PromptInteraction(
+                        user_id=ctx["user_id"],
+                        stream_id=stream_id,
+                        owner_key=owner_key,
+                        phase="upload_prompt_workflow",
+                        entries=workflows,
+                    )
+                )
+                lines = ["请选择提示词对应的工作流："]
+                for index, workflow in enumerate(workflows, 1):
+                    lines.append(
+                        f"{index}. {workflow['workflow_name']} [{workflow.get('region') or 'overseas'}]"
+                    )
+                lines.append("回复数字，或取消")
+                await self._send_text(stream_id, "\n".join(lines))
+        elif action == "上传提示词模板":
             self._register_prompt_interaction(
                 PromptInteraction(
                     user_id=ctx["user_id"],
                     stream_id=stream_id,
                     owner_key=owner_key,
-                    phase="upload_file",
+                    phase="upload_template_file",
                 )
             )
-            await self._send_text(stream_id, "请发送 .md 或 .txt 提示词文件，或回复取消")
+            await self._send_text(stream_id, "请发送 .md 或 .txt 模板文件，或取消")
         else:
             await self._send_text(
                 stream_id,
@@ -2549,7 +2652,8 @@ class RunningHubGenericPlugin(Star):
                 "/wf 保存提示词：保存最近记录\n"
                 "/wf 提示词重跑：重跑最近记录\n"
                 "/wf 提示词：运行或删除已保存记录\n"
-                "/wf 上传提示词：上传 .md/.txt 模板",
+                "/wf 上传提示词：上传可运行提示词\n"
+                "/wf 上传提示词模板：上传 .md/.txt 模板",
             )
         self._mark_handled(event)
 
@@ -2666,7 +2770,10 @@ class RunningHubGenericPlugin(Star):
         user_id = str(raw.get("user_id") or "").strip()
         stream_id = str(event.unified_msg_origin or "")
         interaction = self._prompt_interactions.get(self._session_key(user_id, stream_id))
-        if interaction is not None and interaction.phase == "upload_file":
+        if interaction is not None and interaction.phase in {
+            "upload_template_file",
+            "upload_prompt_file",
+        }:
             if Path(filename).suffix.lower() not in {".md", ".txt"}:
                 await self._send_text(stream_id, "请发送 .md 或 .txt 提示词文件")
                 self._mark_handled(event)
@@ -2678,7 +2785,10 @@ class RunningHubGenericPlugin(Star):
                 await self._send_text(stream_id, f"获取文件失败：{exc}")
                 self._mark_handled(event)
                 return
-            await self._finish_prompt_file_upload(interaction, filename, file_data)
+            if interaction.phase == "upload_template_file":
+                await self._finish_prompt_file_upload(interaction, filename, file_data)
+            else:
+                await self._finish_uploaded_prompt(interaction, filename, file_data)
             self._mark_handled(event)
             return
         session = self._find_input_session(user_id, stream_id)
