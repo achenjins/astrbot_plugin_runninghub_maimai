@@ -13,6 +13,7 @@
 
 命令：
 - /wf运行 <工作流名> [描述文本]
+- /wf 保存提示词 / /wf 提示词重跑 / /wf 提示词
 - /wf工作流
 - /wf国外工作流 <工作流ID> [名称] / /wf国内工作流 <工作流ID> [名称]
 - /wf详细国外工作流 <工作流ID> [名称] / /wf详细国内工作流 <工作流ID> [名称]
@@ -108,6 +109,10 @@ _TASK_HISTORY_FILE = "task_history.json"
 _TASK_HISTORY_MAX = 200
 _TASK_HISTORY_FIELDS = ("task_id", "workflow", "coins")
 
+# 提示词缓存：最近运行每个用户只保留 5 条，手动保存的提示词长期保留。
+_PROMPT_LIBRARY_FILE = "prompt_library.json"
+_RECENT_PROMPT_MAX = 5
+
 # 交互收集会话中，用于"跳过剩余文件、直接开始运行"的触发词
 _FINISH_KEYWORDS = {
     "完成", "开始", "开始运行", "运行", "提交", "结束",
@@ -130,6 +135,8 @@ class InputSession:
     expire_task: asyncio.Task | None = None
     # 文字扩写延后到收集完成：记录原始文本、文字节点身份与实际上传的文件数量
     command_text: str = ""
+    # 复用缓存时直接使用已经扩写完成的提示词，禁止再次调用 LLM。
+    reused_prompt: str = ""
     text_node_id: str = ""
     text_field_name: str = ""
     uploaded_images: int = 0
@@ -142,6 +149,20 @@ class InputSession:
     chat_info: dict[str, str] = field(default_factory=dict)
     # 已接收文件的 SHA-256，用于过滤 QQ 群文件 notice + 普通消息的重复投递
     received_hashes: set[str] = field(default_factory=set)
+
+
+@dataclass
+class PromptInteraction:
+    """保存/选择提示词时的一次短交互。"""
+
+    user_id: str
+    stream_id: str
+    owner_key: str
+    phase: str
+    entries: list[dict[str, Any]] = field(default_factory=list)
+    selected: dict[str, Any] | None = None
+    created_at: float = field(default_factory=time.time)
+    expire_task: asyncio.Task | None = None
 
 
 class RunningHubGenericPlugin(Star):
@@ -173,6 +194,9 @@ class RunningHubGenericPlugin(Star):
         self._task_history: list[dict[str, str]] = []
         self._task_history_recorded: set[str] = set()
         self._task_history_lock: asyncio.Lock = asyncio.Lock()
+        self._prompt_library: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        self._prompt_library_lock: asyncio.Lock = asyncio.Lock()
+        self._prompt_interactions: dict[str, PromptInteraction] = {}
 
     def _event_ctx(self, event: AstrMessageEvent) -> dict[str, str]:
         """把 AstrBot 事件转换为业务层使用的扁平上下文。"""
@@ -403,6 +427,7 @@ class RunningHubGenericPlugin(Star):
         await self._reload_from_context_config()
         self._migrate_embedded_nodes_to_workflow_nodes()
         self._load_task_history()
+        self._load_prompt_library()
         self.logger.info(
             "[配置] 本地配置库已加载: package=%s file=%s",
             _PLUGIN_PACKAGE or "(顶层)",
@@ -501,6 +526,11 @@ class RunningHubGenericPlugin(Star):
             for session in self._input_sessions.values()
             if session.expire_task is not None
         ]
+        expire_tasks.extend(
+            interaction.expire_task
+            for interaction in self._prompt_interactions.values()
+            if interaction.expire_task is not None
+        )
         tasks_to_stop = poll_tasks + recall_tasks + expire_tasks
         if cleanup_task is not None:
             tasks_to_stop.append(cleanup_task)
@@ -514,6 +544,7 @@ class RunningHubGenericPlugin(Star):
         self._input_sessions.clear()
         self._input_session_keys_by_stream.clear()
         self._input_session_keys_by_user.clear()
+        self._prompt_interactions.clear()
         self._task_meta.clear()
         self._cancel_choices.clear()
         self._client = None
@@ -944,6 +975,7 @@ class RunningHubGenericPlugin(Star):
         """查找工作流，构建节点参数，提交任务或进入交互式收集。"""
         stream_id = str(kwargs.pop("stream_id", "") or "")
         command_text = str(command_text or "").strip()
+        reused_prompt = str(kwargs.pop("reused_prompt", "") or "").strip()
         chat_info = self._extract_chat_info(kwargs)
         group_id = str(chat_info.get("group_id") or "")
         user_id = str(kwargs.get("user_id") or chat_info.get("user_id") or "")
@@ -989,6 +1021,11 @@ class RunningHubGenericPlugin(Star):
 
         text_node = self._primary_prompt_node(workflow)
         text_target = self._first_prompt_node(workflow)
+        if reused_prompt and text_target is None:
+            return {
+                "success": False,
+                "message": f"工作流「{workflow.name}」已没有主提示词节点，无法复用该提示词",
+            }
         editable_nodes = self._editable_config_nodes(workflow)
         # 存在无默认值的 prompt 节点且用户没给描述：不能直接提交，先交互收集描述
         missing_prompt_text = bool(text_node is not None and not command_text)
@@ -996,7 +1033,11 @@ class RunningHubGenericPlugin(Star):
         session_text_node = text_target if (command_text or missing_prompt_text) else None
 
         # 先用原始文本构建节点参数（文字节点暂填原文，扩写见下）
-        node_info_list, waiting = self._build_node_info_list(workflow, command_text)
+        node_info_list, waiting = self._build_node_info_list(
+            workflow,
+            command_text,
+            enhanced_text=reused_prompt or None,
+        )
 
         if not node_info_list and not waiting and not editable_nodes and not missing_prompt_text:
             return {"success": False, "message": f"工作流「{workflow.name}」未配置任何输入节点"}
@@ -1010,6 +1051,7 @@ class RunningHubGenericPlugin(Star):
                 waiting_nodes=waiting,
                 collected=node_info_list,
                 command_text=command_text,
+                reused_prompt=reused_prompt,
                 text_node_id=session_text_node.node_id.strip() if session_text_node else "",
                 text_field_name=session_text_node.field_name.strip() if session_text_node else "",
                 editable_nodes=editable_nodes,
@@ -1044,6 +1086,7 @@ class RunningHubGenericPlugin(Star):
                 waiting_nodes=waiting,
                 collected=node_info_list,
                 command_text=command_text,
+                reused_prompt=reused_prompt,
                 text_node_id=session_text_node.node_id.strip() if session_text_node else "",
                 text_field_name=session_text_node.field_name.strip() if session_text_node else "",
                 editable_nodes=editable_nodes,
@@ -1066,16 +1109,27 @@ class RunningHubGenericPlugin(Star):
             return {"success": True, "waiting": True, "required_files": [], "message": "请确认配置"}
 
         # 无文件、无可编辑配置：立即扩写并回填文字节点（用户输入优先，目标为第一个 prompt 节点）
-        if command_text and text_target and workflow.llm_enhance:
-            enhanced_text = await self._enhance_text(workflow, command_text, stream_id=stream_id)
+        final_prompt = reused_prompt or command_text
+        if command_text and text_target and not reused_prompt and workflow.llm_enhance:
+            final_prompt = await self._enhance_text(workflow, command_text, stream_id=stream_id)
+        if command_text and text_target:
             self._patch_text_value(
                 node_info_list,
                 text_target.node_id.strip(),
                 text_target.field_name.strip(),
-                enhanced_text,
+                final_prompt,
             )
 
-        return await self._submit_and_poll(client, workflow, node_info_list, stream_id, kwargs)
+        result = await self._submit_and_poll(client, workflow, node_info_list, stream_id, kwargs)
+        if result.get("success") and command_text and text_target:
+            await self._record_recent_prompt(
+                workflow,
+                command_text,
+                final_prompt,
+                user_id=user_id,
+                platform_id=str(kwargs.get("platform_id") or ""),
+            )
+        return result
 
     async def _submit_and_poll(
         self,
@@ -1167,6 +1221,7 @@ class RunningHubGenericPlugin(Star):
         waiting_nodes: list[dict[str, Any]],
         collected: list[dict[str, str]],
         command_text: str = "",
+        reused_prompt: str = "",
         text_node_id: str = "",
         text_field_name: str = "",
         editable_nodes: list[dict[str, str]] | None = None,
@@ -1189,6 +1244,7 @@ class RunningHubGenericPlugin(Star):
             ],
             collected=collected,
             command_text=command_text,
+            reused_prompt=reused_prompt,
             text_node_id=text_node_id,
             text_field_name=text_field_name,
             editable_nodes=editable_nodes or [],
@@ -1537,13 +1593,14 @@ class RunningHubGenericPlugin(Star):
 
         # 文字扩写延后到此刻：用实际上传的文件数量重新扩写并回填文字节点；
         # 交互补充的描述此时可能还没有对应条目，_patch_text_value 会自动追加。
+        final_prompt = ""
         if session.command_text and session.text_node_id:
-            enhanced = session.command_text
-            if session.workflow.llm_enhance:
+            final_prompt = session.reused_prompt or session.command_text
+            if session.workflow.llm_enhance and not session.reused_prompt:
                 actual_desc = self._format_file_counts(
                     session.uploaded_images, session.uploaded_audios, session.uploaded_videos
                 )
-                enhanced = await self._enhance_text(
+                final_prompt = await self._enhance_text(
                     session.workflow,
                     session.command_text,
                     actual_file_desc=actual_desc,
@@ -1553,7 +1610,7 @@ class RunningHubGenericPlugin(Star):
                 session.collected,
                 session.text_node_id,
                 session.text_field_name,
-                enhanced,
+                final_prompt,
             )
 
         await self._send_text(stream_id, notice)
@@ -1566,6 +1623,14 @@ class RunningHubGenericPlugin(Star):
         result = await self._submit_and_poll(
             client, session.workflow, session.collected, stream_id, kwargs
         )
+        if result.get("success") and final_prompt:
+            await self._record_recent_prompt(
+                session.workflow,
+                session.command_text,
+                final_prompt,
+                user_id=str(session.chat_info.get("user_id") or session.user_id),
+                platform_id=str(session.chat_info.get("platform_id") or ""),
+            )
         if not result["success"]:
             await self._send_text(stream_id, result["message"])
         else:
@@ -1606,6 +1671,139 @@ class RunningHubGenericPlugin(Star):
         session = self._remove_input_session(key)
         if session is not None and session.expire_task is not None:
             session.expire_task.cancel()
+
+    @staticmethod
+    def _prompt_summary(text: str, limit: int = 120) -> str:
+        """把多行提示词压成适合编号列表展示的一行。"""
+        summary = re.sub(r"\s+", " ", str(text or "")).strip()
+        return summary if len(summary) <= limit else summary[: limit - 1] + "…"
+
+    def _remove_prompt_interaction(self, key: str) -> PromptInteraction | None:
+        interaction = self._prompt_interactions.pop(key, None)
+        if (
+            interaction is not None
+            and interaction.expire_task is not None
+            and interaction.expire_task is not asyncio.current_task()
+        ):
+            interaction.expire_task.cancel()
+        return interaction
+
+    def _register_prompt_interaction(self, interaction: PromptInteraction) -> str:
+        """注册提示词选择交互，并取消同用户在当前会话中的旧输入收集。"""
+        key = self._session_key(interaction.user_id, interaction.stream_id)
+        self._remove_prompt_interaction(key)
+        self._cancel_input_session(key)
+        self._prompt_interactions[key] = interaction
+
+        async def _expire() -> None:
+            await asyncio.sleep(_INPUT_WAIT_TIMEOUT)
+            if self._prompt_interactions.get(key) is interaction:
+                self._prompt_interactions.pop(key, None)
+                if interaction.stream_id:
+                    try:
+                        await self._send_text(
+                            interaction.stream_id, "提示词选择已超时，请重新输入命令"
+                        )
+                    except (OSError, RuntimeError):
+                        pass
+
+        interaction.expire_task = asyncio.create_task(_expire())
+        return key
+
+    def _find_workflow_for_prompt(self, entry: dict[str, Any]) -> WorkflowItemSection | None:
+        """优先按工作流 ID 找当前配置，兼容工作流在保存后改名。"""
+        workflow_id = str(entry.get("workflow_id") or "").strip()
+        region = str(entry.get("region") or "overseas").strip()
+        if workflow_id:
+            for workflow in self._workflows:
+                if (
+                    str(workflow.workflow_id or "").strip() == workflow_id
+                    and str(workflow.region or "overseas").strip() == region
+                ):
+                    return workflow
+            return None
+        return self._find_workflow(str(entry.get("workflow_name") or ""))
+
+    async def _start_cached_prompt(
+        self, event: AstrMessageEvent, entry: dict[str, Any]
+    ) -> dict[str, Any]:
+        """使用已扩写提示词启动原工作流，重新收集文件与可编辑参数。"""
+        workflow = self._find_workflow_for_prompt(entry)
+        if workflow is None:
+            return {
+                "success": False,
+                "message": "原工作流已不存在或区域已改变，无法复用该提示词",
+            }
+        kwargs = self._event_ctx(event)
+        kwargs["trigger"] = "cached_prompt"
+        kwargs["reused_prompt"] = str(entry.get("enhanced_prompt") or "").strip()
+        return await self._start_workflow(
+            workflow.name,
+            str(entry.get("original_prompt") or entry.get("enhanced_prompt") or "").strip(),
+            **kwargs,
+        )
+
+    @staticmethod
+    def _parse_prompt_choice(text: str, count: int) -> int | None:
+        text = str(text or "").strip()
+        if not text.isdigit():
+            return None
+        choice = int(text)
+        return choice - 1 if 1 <= choice <= count else None
+
+    async def _handle_prompt_interaction(
+        self, interaction: PromptInteraction, event: AstrMessageEvent
+    ) -> bool:
+        """消费保存描述或提示词编号选择消息。"""
+        text = self._extract_text_from_event(event).strip()
+        key = self._session_key(interaction.user_id, interaction.stream_id)
+        stream_id = str(event.unified_msg_origin or interaction.stream_id)
+        if text.startswith("/"):
+            self._remove_prompt_interaction(key)
+            return False
+        if text.lower() in {"取消", "退出", "cancel", "quit"}:
+            self._remove_prompt_interaction(key)
+            await self._send_text(stream_id, "已取消提示词操作")
+            return True
+
+        if interaction.phase == "save_description":
+            if not text:
+                await self._send_text(stream_id, "请发送一段文字作为保存描述，或回复“取消”")
+                return True
+            if len(text) > 100:
+                await self._send_text(stream_id, "保存描述不能超过 100 个字符，请重新发送")
+                return True
+            selected = interaction.selected
+            if selected is None:
+                self._remove_prompt_interaction(key)
+                await self._send_text(stream_id, "待保存提示词已失效，请重新输入 /wf 保存提示词")
+                return True
+            await self._save_prompt_entry(interaction.owner_key, selected, text)
+            self._remove_prompt_interaction(key)
+            await self._send_text(stream_id, f"已保存提示词：{text}")
+            return True
+
+        choice = self._parse_prompt_choice(text, len(interaction.entries))
+        if choice is None:
+            await self._send_text(
+                stream_id,
+                f"请回复 1-{len(interaction.entries)} 的数字，或回复“取消”",
+            )
+            return True
+        selected = interaction.entries[choice]
+        if interaction.phase == "save_select":
+            interaction.selected = selected
+            interaction.phase = "save_description"
+            await self._send_text(
+                stream_id,
+                "请发送这条提示词的保存描述（例如：雨夜霓虹猫），或回复“取消”",
+            )
+            return True
+
+        self._remove_prompt_interaction(key)
+        result = await self._start_cached_prompt(event, selected)
+        await self._send_text(stream_id, result["message"])
+        return True
 
     def _build_waiting_tips_from_dicts(self, waiting: list[dict[str, str]]) -> str:
         return self._format_waiting_summary(waiting)
@@ -2007,6 +2205,12 @@ class RunningHubGenericPlugin(Star):
         """拦截交互式输入会话中的文件 / 控制词消息，阻止其继续进入 LLM。"""
         user_id = str(event.get_sender_id() or "")
         stream_id = str(event.unified_msg_origin or "")
+        interaction = self._prompt_interactions.get(self._session_key(user_id, stream_id))
+        if interaction is not None and await self._handle_prompt_interaction(
+            interaction, event
+        ):
+            self._mark_handled(event)
+            return
         session = self._find_input_session(user_id, stream_id)
         if session is None:
             choice_key = user_id or stream_id
@@ -2041,6 +2245,89 @@ class RunningHubGenericPlugin(Star):
             # 真实文件由 handle_notice_collector 处理，这里只拦截普通消息，避免进入默认 LLM
             self._mark_handled(event)
             return
+
+    @filter.command("wf")
+    async def handle_prompt_command(self, event: AstrMessageEvent) -> None:
+        """管理和复用扩写提示词。"""
+        if self._is_consumed(event):
+            return
+        ctx = self._event_ctx(event)
+        stream_id = ctx["stream_id"]
+        allowed, deny_msg = self._check_access(ctx["user_id"], ctx["group_id"])
+        if not allowed:
+            await self._send_text(stream_id, deny_msg)
+            self._mark_handled(event)
+            return
+        rest = re.sub(
+            r"^/?wf(?:\s+|[：:，,、]+)",
+            "",
+            str(event.message_str or "").strip(),
+            count=1,
+        ).strip()
+        action = re.sub(r"\s+", "", rest)
+        owner_key = self._prompt_owner_key(ctx["user_id"], ctx["platform_id"])
+        session_key = self._session_key(ctx["user_id"], stream_id)
+
+        if action == "保存提示词":
+            entries = self._prompt_entries(owner_key, "recent")[:_RECENT_PROMPT_MAX]
+            if not entries:
+                await self._send_text(stream_id, "还没有可保存的最近提示词，请先运行一次带描述的工作流")
+            else:
+                lines = ["最近运行的提示词（显示扩写前描述）："]
+                for index, entry in enumerate(entries, 1):
+                    summary = self._prompt_summary(str(entry.get("original_prompt") or ""))
+                    lines.append(f"{index}. [{entry['workflow_name']}] {summary}")
+                lines.append("回复数字选择要持久保存的提示词，或回复“取消”")
+                self._register_prompt_interaction(
+                    PromptInteraction(
+                        user_id=ctx["user_id"],
+                        stream_id=stream_id,
+                        owner_key=owner_key,
+                        phase="save_select",
+                        entries=entries,
+                    )
+                )
+                await self._send_text(stream_id, "\n".join(lines))
+        elif action == "提示词重跑":
+            entries = self._prompt_entries(owner_key, "recent")
+            if not entries:
+                await self._send_text(stream_id, "还没有最近运行的提示词，无法重跑")
+            else:
+                self._remove_prompt_interaction(session_key)
+                self._cancel_input_session(session_key)
+                result = await self._start_cached_prompt(event, entries[0])
+                await self._send_text(stream_id, result["message"])
+        elif action == "提示词":
+            entries = self._prompt_entries(owner_key, "saved")
+            if not entries:
+                await self._send_text(
+                    stream_id, "还没有保存的提示词，可先输入 /wf 保存提示词 从最近记录中保存"
+                )
+            else:
+                lines = ["已保存的提示词："]
+                for index, entry in enumerate(entries, 1):
+                    description = self._prompt_summary(str(entry.get("description") or ""), 80)
+                    lines.append(f"{index}. {description} [{entry['workflow_name']}]")
+                lines.append("回复数字选择并按提示重新上传文件/修改参数，或回复“取消”")
+                self._register_prompt_interaction(
+                    PromptInteraction(
+                        user_id=ctx["user_id"],
+                        stream_id=stream_id,
+                        owner_key=owner_key,
+                        phase="run_select",
+                        entries=entries,
+                    )
+                )
+                await self._send_text(stream_id, "\n".join(lines))
+        else:
+            await self._send_text(
+                stream_id,
+                "提示词命令：\n"
+                "/wf 保存提示词 - 从最近 5 条中选择并保存\n"
+                "/wf 提示词重跑 - 复用最近一次提示词\n"
+                "/wf 提示词 - 选择已保存提示词运行",
+            )
+        self._mark_handled(event)
 
     @filter.command("wf中断")
     async def handle_rh_cancel(self, event: AstrMessageEvent) -> None:
@@ -2719,6 +3006,167 @@ class RunningHubGenericPlugin(Star):
         except ImportError:
             from flask import request as web_request
             return web_request.get_json(silent=True) or {}
+
+    # ── 提示词缓存 ────────────────────────────────────────────────
+
+    @staticmethod
+    def _prompt_owner_key(user_id: str, platform_id: str = "") -> str:
+        """生成提示词库所有者键，避免不同平台的相同用户 ID 串库。"""
+        user_id = str(user_id or "").strip()
+        platform_id = str(platform_id or "").strip()
+        if not user_id:
+            return ""
+        return f"{platform_id}:{user_id}" if platform_id else user_id
+
+    def _prompt_library_path(self) -> Path:
+        """提示词库文件路径（保存在 AstrBot 插件持久化目录）。"""
+        directory = Path(get_astrbot_plugin_data_path()).resolve() / _PLUGIN_DIR.name
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory / _PROMPT_LIBRARY_FILE
+
+    @staticmethod
+    def _normalise_prompt_entry(raw: Any) -> dict[str, Any] | None:
+        """校验持久化提示词条目，只接收运行所需的稳定字段。"""
+        if not isinstance(raw, dict):
+            return None
+        workflow_name = str(raw.get("workflow_name") or "").strip()
+        workflow_id = str(raw.get("workflow_id") or "").strip()
+        original_prompt = str(raw.get("original_prompt") or "").strip()
+        enhanced_prompt = str(raw.get("enhanced_prompt") or "").strip()
+        if not workflow_name or not enhanced_prompt:
+            return None
+        try:
+            created_at = float(raw.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        try:
+            saved_at = float(raw.get("saved_at") or 0)
+        except (TypeError, ValueError):
+            saved_at = 0.0
+        return {
+            "workflow_name": workflow_name,
+            "workflow_id": workflow_id,
+            "region": str(raw.get("region") or "overseas").strip() or "overseas",
+            "original_prompt": original_prompt or enhanced_prompt,
+            "enhanced_prompt": enhanced_prompt,
+            "description": str(raw.get("description") or "").strip(),
+            "created_at": created_at,
+            "saved_at": saved_at,
+        }
+
+    def _load_prompt_library(self) -> None:
+        """从磁盘读取按用户隔离的最近提示词和持久保存提示词。"""
+        path = self._prompt_library_path()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            self.logger.warning("[提示词缓存] 读取文件失败: %s", exc)
+            return
+        users = raw.get("users") if isinstance(raw, dict) else None
+        if not isinstance(users, dict):
+            return
+        library: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for owner_key, owner_data in users.items():
+            if not isinstance(owner_key, str) or not isinstance(owner_data, dict):
+                continue
+            recent = [
+                entry
+                for item in owner_data.get("recent") or []
+                if (entry := self._normalise_prompt_entry(item)) is not None
+            ][:_RECENT_PROMPT_MAX]
+            saved = [
+                entry
+                for item in owner_data.get("saved") or []
+                if (entry := self._normalise_prompt_entry(item)) is not None
+                and entry["description"]
+            ]
+            if recent or saved:
+                library[owner_key] = {"recent": recent, "saved": saved}
+        self._prompt_library = library
+
+    def _write_prompt_library_file(self) -> None:
+        """原子写入提示词库文件（调用方需持有 _prompt_library_lock）。"""
+        path = self._prompt_library_path()
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(
+            json.dumps({"version": 1, "users": self._prompt_library}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp.replace(path)
+
+    def _prompt_entries(self, owner_key: str, kind: str) -> list[dict[str, Any]]:
+        """返回某用户的提示词条目副本，防止交互过程中被新任务改写。"""
+        owner = self._prompt_library.get(owner_key) or {}
+        entries = owner.get(kind) or []
+        return [dict(item) for item in entries]
+
+    async def _record_recent_prompt(
+        self,
+        workflow: WorkflowItemSection,
+        original_prompt: str,
+        enhanced_prompt: str,
+        *,
+        user_id: str,
+        platform_id: str = "",
+    ) -> None:
+        """记录一次成功提交使用的最终提示词，按工作流和内容去重。"""
+        owner_key = self._prompt_owner_key(user_id, platform_id)
+        enhanced_prompt = str(enhanced_prompt or "").strip()
+        if not owner_key or not enhanced_prompt:
+            return
+        entry = {
+            "workflow_name": str(workflow.name or "").strip(),
+            "workflow_id": str(workflow.workflow_id or "").strip(),
+            "region": str(workflow.region or "overseas").strip(),
+            "original_prompt": str(original_prompt or enhanced_prompt).strip(),
+            "enhanced_prompt": enhanced_prompt,
+            "description": "",
+            "created_at": time.time(),
+            "saved_at": 0.0,
+        }
+        async with self._prompt_library_lock:
+            owner = self._prompt_library.setdefault(owner_key, {"recent": [], "saved": []})
+            recent = owner.setdefault("recent", [])
+            recent[:] = [
+                item
+                for item in recent
+                if not (
+                    item.get("workflow_id") == entry["workflow_id"]
+                    and item.get("enhanced_prompt") == enhanced_prompt
+                )
+            ]
+            recent.insert(0, entry)
+            del recent[_RECENT_PROMPT_MAX:]
+            try:
+                await asyncio.to_thread(self._write_prompt_library_file)
+            except OSError as exc:  # pragma: no cover
+                self.logger.warning("[提示词缓存] 写入最近提示词失败: %s", exc)
+
+    async def _save_prompt_entry(
+        self, owner_key: str, entry: dict[str, Any], description: str
+    ) -> None:
+        """把一条最近提示词加入用户的持久保存列表。"""
+        saved_entry = dict(entry)
+        saved_entry["description"] = str(description or "").strip()
+        saved_entry["saved_at"] = time.time()
+        async with self._prompt_library_lock:
+            owner = self._prompt_library.setdefault(owner_key, {"recent": [], "saved": []})
+            saved = owner.setdefault("saved", [])
+            saved[:] = [
+                item
+                for item in saved
+                if not (
+                    item.get("workflow_id") == saved_entry.get("workflow_id")
+                    and item.get("enhanced_prompt") == saved_entry.get("enhanced_prompt")
+                )
+            ]
+            saved.insert(0, saved_entry)
+            try:
+                await asyncio.to_thread(self._write_prompt_library_file)
+            except OSError as exc:  # pragma: no cover
+                self.logger.warning("[提示词缓存] 写入保存提示词失败: %s", exc)
 
     # ── 余额 / 任务记录（Pages）───────────────────────────────
 

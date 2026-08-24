@@ -812,3 +812,156 @@ def test_task_history_caps_records(
     assert len(star._task_history) == 2
     assert star._task_history[0]["task_id"] == "task_2"
     assert star._task_history[-1]["task_id"] == "task_1"
+
+
+def test_recent_prompt_cache_is_per_user_persistent_and_caps_at_five(
+    ctx: FakeContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    star = plugin_main.RunningHubGenericPlugin(ctx, None)
+    workflow = plugin_main.WorkflowItemSection(
+        name="动漫生图", workflow_id="42", region="overseas"
+    )
+
+    async def _run() -> None:
+        for index in range(6):
+            await star._record_recent_prompt(
+                workflow,
+                f"原始描述 {index}",
+                f"扩写提示词 {index}",
+                user_id="10001",
+                platform_id="fake",
+            )
+        await star._record_recent_prompt(
+            workflow,
+            "另一个用户",
+            "另一个用户的扩写",
+            user_id="10002",
+            platform_id="fake",
+        )
+
+    asyncio.run(_run())
+    owner_key = star._prompt_owner_key("10001", "fake")
+    recent = star._prompt_entries(owner_key, "recent")
+    assert len(recent) == 5
+    assert recent[0]["original_prompt"] == "原始描述 5"
+    assert recent[-1]["original_prompt"] == "原始描述 1"
+
+    reloaded = plugin_main.RunningHubGenericPlugin(ctx, None)
+    reloaded._load_prompt_library()
+    assert reloaded._prompt_entries(owner_key, "recent") == recent
+    other_key = reloaded._prompt_owner_key("10002", "fake")
+    assert len(reloaded._prompt_entries(other_key, "recent")) == 1
+
+
+def test_cached_prompt_run_skips_llm_enhancement_and_records_submission(
+    star: plugin_main.RunningHubGenericPlugin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    star._apply_config_dict(
+        {
+            "server": {"api_key": "test-key"},
+            "workflows": [
+                {
+                    "__template_key": "workflow",
+                    "name": "复用测试",
+                    "workflow_id": "42",
+                    "region": "overseas",
+                    "llm_enhance": True,
+                    "input_nodes": [
+                        {
+                            "node_id": "353",
+                            "field_name": "prompt",
+                            "value_type": "prompt",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    star._refresh_workflows()
+    star._client = object()
+    submitted: list[dict[str, str]] = []
+    recorded: list[tuple[str, str]] = []
+
+    async def fail_enhance(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("缓存提示词不应再次扩写")
+
+    async def fake_submit(
+        client: Any,
+        workflow: Any,
+        node_info_list: list[dict[str, str]],
+        stream_id: str,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        submitted.extend(node_info_list)
+        return {"success": True, "task_id": "task-1", "message": "已运行"}
+
+    async def fake_record(
+        workflow: Any,
+        original_prompt: str,
+        enhanced_prompt: str,
+        **kwargs: Any,
+    ) -> None:
+        recorded.append((original_prompt, enhanced_prompt))
+
+    monkeypatch.setattr(star, "_enhance_text", fail_enhance)
+    monkeypatch.setattr(star, "_submit_and_poll", fake_submit)
+    monkeypatch.setattr(star, "_record_recent_prompt", fake_record)
+
+    async def _run() -> dict[str, Any]:
+        return await star._start_workflow(
+            "复用测试",
+            "扩写前描述",
+            reused_prompt="已经扩写完成的提示词",
+            stream_id="fake:group_message:20001",
+            user_id="10001",
+            group_id="20001",
+            platform_id="fake",
+        )
+
+    result = asyncio.run(_run())
+    assert result["success"] is True
+    assert submitted[0]["fieldValue"] == "已经扩写完成的提示词"
+    assert recorded == [("扩写前描述", "已经扩写完成的提示词")]
+
+
+def test_save_prompt_command_uses_number_then_description(
+    ctx: FakeContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    star = plugin_main.RunningHubGenericPlugin(ctx, None)
+    owner_key = star._prompt_owner_key("10001", "fake")
+    star._prompt_library[owner_key] = {
+        "recent": [
+            {
+                "workflow_name": "动漫生图",
+                "workflow_id": "42",
+                "region": "overseas",
+                "original_prompt": "一只窗边的猫",
+                "enhanced_prompt": "完整扩写提示词",
+                "description": "",
+                "created_at": 1.0,
+                "saved_at": 0.0,
+            }
+        ],
+        "saved": [],
+    }
+
+    async def _run() -> None:
+        await star.handle_prompt_command(FakeEvent("/wf 保存提示词"))
+        await star.handle_input_collector(FakeEvent("1"))
+        await star.handle_input_collector(FakeEvent("窗边猫模板"))
+
+    asyncio.run(_run())
+    saved = star._prompt_entries(owner_key, "saved")
+    assert len(saved) == 1
+    assert saved[0]["description"] == "窗边猫模板"
+    messages = [item[1].get_plain_text() for item in ctx.sent]
+    assert any("一只窗边的猫" in message for message in messages)
+    assert any("请发送这条提示词的保存描述" in message for message in messages)
+    assert any("已保存提示词：窗边猫模板" in message for message in messages)
