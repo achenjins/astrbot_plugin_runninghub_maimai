@@ -237,6 +237,82 @@ def test_delivery_prefers_generic_for_plain_send(ctx: FakeContext) -> None:
     assert len(ctx.sent) == 1
 
 
+def test_delivery_falls_back_to_file_when_onebot_video_fails(ctx: FakeContext) -> None:
+    class FakeBot:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def call_action(self, action: str, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append((action, kwargs))
+            if action == "send_group_msg" and kwargs["message"][0]["type"] == "video":
+                return {
+                    "status": "failed",
+                    "retcode": 1200,
+                    "message": "rich media transfer failed",
+                }
+            return {"status": "ok", "retcode": 0, "data": {"message_id": 88}}
+
+    class FakePlatform:
+        def __init__(self, bot: FakeBot) -> None:
+            self._bot = bot
+
+        def get_client(self) -> FakeBot:
+            return self._bot
+
+    bot = FakeBot()
+    ctx.platform_inst = FakePlatform(bot)
+    delivery = Delivery(ctx, __import__("logging").getLogger("test"))
+    target = DeliveryTarget(
+        stream_id="fake:group_message:20001",
+        group_id="20001",
+        platform_id="fake",
+    )
+
+    async def _run() -> str:
+        return await delivery.send_video(
+            target, "https://runninghub.example/video/result.mp4", need_message_id=True
+        )
+
+    message_id = asyncio.run(_run())
+    assert message_id == "88"
+    assert len(bot.calls) == 2
+    assert bot.calls[0][1]["message"][0]["type"] == "video"
+    assert bot.calls[1][1]["message"][0]["type"] == "file"
+    assert bot.calls[1][1]["message"][0]["data"]["file"].endswith("/result.mp4")
+
+
+def test_delivery_does_not_duplicate_successful_onebot_video(ctx: FakeContext) -> None:
+    class FakeBot:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def call_action(self, action: str, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(action)
+            return {"status": "ok", "retcode": 0, "data": {"message_id": 89}}
+
+    class FakePlatform:
+        def __init__(self, bot: FakeBot) -> None:
+            self._bot = bot
+
+        def get_client(self) -> FakeBot:
+            return self._bot
+
+    bot = FakeBot()
+    ctx.platform_inst = FakePlatform(bot)
+    delivery = Delivery(ctx, __import__("logging").getLogger("test"))
+    target = DeliveryTarget(
+        stream_id="fake:group_message:20001",
+        group_id="20001",
+        platform_id="fake",
+    )
+
+    async def _run() -> str:
+        return await delivery.send_video(target, "https://runninghub.example/video/result.mp4")
+
+    assert asyncio.run(_run()) == ""
+    assert bot.calls == ["send_group_msg"]
+
+
 def test_onebot_recall_treats_none_data_as_success(ctx: FakeContext) -> None:
     class FakeBot:
         def __init__(self) -> None:

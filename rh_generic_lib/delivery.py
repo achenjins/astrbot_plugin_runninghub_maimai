@@ -1,6 +1,6 @@
 """消息投递与撤回通道。
 
-设计目标：把「发文本 / 发图 / 发视频 / 撤回」从插件业务代码中剥离出来。
+设计目标：把「发文本 / 发图 / 发视频 / 发文件 / 撤回」从插件业务代码中剥离出来。
 
 - ``DeliveryTarget``：描述一条消息要发到哪里（会话、群号、用户号、平台、事件）。
 - ``BaseDeliveryChannel``：通道抽象接口。
@@ -12,8 +12,8 @@
 
 maibot 原插件因为宿主没有撤回接口，只能在插件里硬编码多套 NapCat API 命名空间并
 直发消息获取 message_id；迁移到 AstrBot 后，这一层收敛到本模块：发送优先走
-AstrBot 通用通道，仅在需要 message_id 做撤回时才使用 OneBot 直发。后续适配其他
-平台只需新增 Channel 实现并扩展 ``Delivery.channel_for``。
+AstrBot 通用通道；NapCat 视频失败时自动回退为文件发送。后续适配其他平台只需新增
+Channel 实现并扩展 ``Delivery.channel_for``。
 """
 
 from __future__ import annotations
@@ -21,10 +21,19 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
+from astrbot.api.message_components import File as FileComponent
 from astrbot.api.message_components import Video as VideoComponent
 from astrbot.api.star import Context
+
+
+def _filename_from_url(value: str, default: str = "video.mp4") -> str:
+    """Extract a safe filename for a file message sent from a remote URL."""
+    path = unquote(urlparse(str(value or "")).path or "")
+    name = path.rsplit("/", 1)[-1].strip()
+    return name or default
 
 
 @dataclass
@@ -79,6 +88,12 @@ class BaseDeliveryChannel(ABC):
     @abstractmethod
     async def send_video(self, target: DeliveryTarget, video_url: str) -> str:
         """发送视频。返回平台 message_id；拿不到时返回空字符串。"""
+
+    @abstractmethod
+    async def send_file(
+        self, target: DeliveryTarget, file_url: str, filename: str = ""
+    ) -> str:
+        """发送文件。返回平台 message_id；拿不到时返回空字符串。"""
 
     @abstractmethod
     async def recall(self, target: DeliveryTarget, message_id: str) -> bool:
@@ -140,6 +155,22 @@ class GenericAstrBotChannel(BaseDeliveryChannel):
             return ""
         except Exception as exc:
             self.logger.warning("通用通道发送视频链接失败: %s", exc)
+            return ""
+
+    async def send_file(
+        self, target: DeliveryTarget, file_url: str, filename: str = ""
+    ) -> str:
+        if not target.stream_id or not str(file_url or ""):
+            return ""
+        try:
+            name = filename or _filename_from_url(file_url)
+            await self.context.send_message(
+                target.stream_id,
+                MessageChain([FileComponent(name=name, url=str(file_url))]),
+            )
+            return ""
+        except Exception as exc:
+            self.logger.warning("通用通道发送文件失败: %s", exc)
             return ""
 
     async def recall(self, target: DeliveryTarget, message_id: str) -> bool:
@@ -207,6 +238,12 @@ class OneBotChannel(BaseDeliveryChannel):
         return response
 
     async def _send(self, target: DeliveryTarget, segments: list[dict]) -> str:
+        message_id, _ = await self._send_with_status(target, segments)
+        return message_id
+
+    async def _send_with_status(
+        self, target: DeliveryTarget, segments: list[dict]
+    ) -> tuple[str, bool]:
         group_id = str(target.group_id or "")
         user_id = str(target.user_id or "")
         try:
@@ -224,9 +261,11 @@ class OneBotChannel(BaseDeliveryChannel):
                 return ""
         except (TypeError, ValueError):
             self.logger.warning("group_id/user_id 不是数字，无法 OneBot 直发")
-            return ""
+            return "", False
         response = await self._call_action(action, params)
-        return self._extract_message_id(response)
+        if response is None:
+            return "", False
+        return self._extract_message_id(response), True
 
     async def send_text(self, target: DeliveryTarget, text: str) -> bool:
         if not str(text or ""):
@@ -245,10 +284,40 @@ class OneBotChannel(BaseDeliveryChannel):
         )
 
     async def send_video(self, target: DeliveryTarget, video_url: str) -> str:
+        message_id, _ = await self.send_video_with_status(target, video_url)
+        return message_id
+
+    async def send_video_with_status(
+        self, target: DeliveryTarget, video_url: str
+    ) -> tuple[str, bool]:
         if not str(video_url or ""):
-            return ""
-        return await self._send(
+            return "", False
+        return await self._send_with_status(
             target, [{"type": "video", "data": {"file": str(video_url)}}]
+        )
+
+    async def send_file(
+        self, target: DeliveryTarget, file_url: str, filename: str = ""
+    ) -> str:
+        message_id, _ = await self.send_file_with_status(target, file_url, filename)
+        return message_id
+
+    async def send_file_with_status(
+        self, target: DeliveryTarget, file_url: str, filename: str = ""
+    ) -> tuple[str, bool]:
+        if not str(file_url or ""):
+            return "", False
+        return await self._send_with_status(
+            target,
+            [
+                {
+                    "type": "file",
+                    "data": {
+                        "file": str(file_url),
+                        "name": filename or _filename_from_url(file_url),
+                    },
+                }
+            ],
         )
 
     async def recall(self, target: DeliveryTarget, message_id: str) -> bool:
@@ -332,8 +401,8 @@ class Delivery:
     ) -> str:
         """发送图片并返回 message_id。
 
-        ``need_message_id=True``（需要撤回）时才走 OneBot 直发；否则优先
-        AstrBot 通用通道。直发失败自动回退通用通道。
+        OneBot/NapCat 优先发送视频；远程视频富媒体失败时自动改发文件，
+        两种 OneBot 方式都失败后再回退 AstrBot 通用通道。
         """
         bot = self.get_onebot_client(target)
         if need_message_id and bot is not None and (target.group_id or target.user_id):
@@ -355,14 +424,37 @@ class Delivery:
         AstrBot 通用通道。直发失败自动回退通用通道。
         """
         bot = self.get_onebot_client(target)
-        if need_message_id and bot is not None and (target.group_id or target.user_id):
-            message_id = await OneBotChannel(bot, self.logger).send_video(
-                target, video_url
-            )
-            if message_id:
-                return message_id
-            self.logger.debug("OneBot 直发视频失败或未返回 message_id，回退通用通道")
+        if bot is not None and (target.group_id or target.user_id):
+            onebot = OneBotChannel(bot, self.logger)
+            message_id, video_sent = await onebot.send_video_with_status(target, video_url)
+            if video_sent:
+                return message_id if need_message_id else ""
+            # NapCat 4.18.14 等版本对远程 video 段可能报 rich media transfer failed；
+            # 同一 URL 作为 file 段由 NapCat 的通用文件上传流程处理，更稳定。
+            self.logger.warning("OneBot 视频发送失败，改用文件发送: %s", video_url)
+            file_message_id, file_sent = await onebot.send_file_with_status(target, video_url)
+            if file_sent:
+                return file_message_id if need_message_id else ""
+            self.logger.debug("OneBot 直发视频和文件均失败，回退通用通道")
         await self._generic.send_video(target, video_url)
+        return ""
+
+    async def send_file(
+        self,
+        target: DeliveryTarget,
+        file_url: str,
+        *,
+        filename: str = "",
+        need_message_id: bool = False,
+    ) -> str:
+        """按文件消息发送资源，适用于 NapCat 视频富媒体失败时的兜底。"""
+        bot = self.get_onebot_client(target)
+        if bot is not None and (target.group_id or target.user_id):
+            message_id = await OneBotChannel(bot, self.logger).send_file(
+                target, file_url, filename
+            )
+            return message_id if need_message_id else ""
+        await self._generic.send_file(target, file_url, filename)
         return ""
 
     async def recall(self, target: DeliveryTarget, message_id: str) -> bool:
