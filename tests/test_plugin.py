@@ -1168,7 +1168,7 @@ def test_upload_prompt_file_command_saves_txt_template(
     assert any("提示词模板已上传：my_prompt.md" in message for message in messages)
 
 
-@pytest.mark.parametrize("encoding", ["gb18030", "utf-16"])
+@pytest.mark.parametrize("encoding", ["gb18030", "big5", "utf-16"])
 def test_upload_prompt_file_auto_decodes_common_encodings(
     ctx: FakeContext,
     tmp_path: Path,
@@ -1177,7 +1177,11 @@ def test_upload_prompt_file_auto_decodes_common_encodings(
 ) -> None:
     monkeypatch.setattr(plugin_main, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
     star = plugin_main.RunningHubGenericPlugin(ctx, None)
-    content = "# 提示词\n描写一只雨夜的猫"
+    content = (
+        "# 提示詞\n描寫一隻雨夜裡的貓"
+        if encoding == "big5"
+        else "# 提示词\n描写一只雨夜的猫"
+    )
     filename = f"encoded_{encoding.replace('-', '_')}.txt"
     source = tmp_path / filename
     source.write_bytes(content.encode(encoding))

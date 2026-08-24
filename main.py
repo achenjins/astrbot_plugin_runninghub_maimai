@@ -46,6 +46,11 @@ from astrbot.api.message_components import Video as VideoComponent
 from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_plugin_data_path
 
+try:
+    from charset_normalizer import from_bytes as _detect_text_encoding
+except ImportError:  # pragma: no cover - requests normally installs this dependency
+    _detect_text_encoding = None
+
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _PLUGIN_PACKAGE = __package__ or ""
 
@@ -1840,6 +1845,15 @@ class RunningHubGenericPlugin(Star):
             return file_data.decode("utf-8"), "UTF-8"
         except UnicodeDecodeError:
             pass
+
+        if _detect_text_encoding is not None:
+            try:
+                detected = _detect_text_encoding(file_data).best()
+                encoding = str(getattr(detected, "encoding", "") or "").strip()
+                if encoding:
+                    return file_data.decode(encoding), encoding.upper().replace("_", "-")
+            except (LookupError, UnicodeDecodeError):
+                pass
 
         # 无 BOM 的 UTF-16 文本通常含有大量 NUL 字节，先尝试按其端序解码。
         if b"\x00" in file_data[:256]:
