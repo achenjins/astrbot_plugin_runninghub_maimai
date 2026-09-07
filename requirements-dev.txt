@@ -1,0 +1,3 @@
+-r requirements.txt
+astrbot>=4.24.2,<5
+pytest>=8,<9

@@ -19,7 +19,7 @@
 - /wf国外工作流 <工作流ID> [名称] / /wf国内工作流 <工作流ID> [名称]
 - /wf详细国外工作流 <工作流ID> [名称] / /wf详细国内工作流 <工作流ID> [名称]
 - /wf中断
-LLM 工具：run_workflow
+LLM 工具：get_workflow_context / run_workflow
 Web API：POST /api/plug/runninghub_workflow_adapter/run_workflow_api
 """
 
@@ -100,6 +100,12 @@ detect_key_nodes = _detect_lib.detect_key_nodes
 describe_workflow_for_llm = _detect_lib.describe_workflow_for_llm
 parse_llm_nodes = _detect_lib.parse_llm_nodes
 
+_validation_lib = _load_local_module("validation")
+
+_chat_lib = _load_local_module("chat_workflows")
+ChatWorkflowMixin = _chat_lib.ChatWorkflowMixin
+ResultDeliveryMixin = _load_local_module("result_delivery").ResultDeliveryMixin
+
 
 __all__ = ["RunningHubGenericPlugin"]
 
@@ -156,7 +162,10 @@ class InputSession:
     # 触发时的会话上下文（group_id/user_id），提交后用于 NapCat 直发与自动撤回
     chat_info: dict[str, str] = field(default_factory=dict)
     # 已接收文件的 SHA-256，用于过滤 QQ 群文件 notice + 普通消息的重复投递
+    received_labels: list[str] = field(default_factory=list)
     received_hashes: set[str] = field(default_factory=set)
+    execution_context: dict[str, Any] = field(default_factory=dict)
+    consume_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass
@@ -173,7 +182,7 @@ class PromptInteraction:
     expire_task: asyncio.Task | None = None
 
 
-class RunningHubGenericPlugin(Star):
+class RunningHubGenericPlugin(ChatWorkflowMixin, ResultDeliveryMixin, Star):
     """麦麦画师 · RunningHub（AstrBot）插件主体。"""
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -186,17 +195,18 @@ class RunningHubGenericPlugin(Star):
         self._client: RunningHubClient | None = None
         self._client_cn: RunningHubClient | None = None
         self._semaphore: asyncio.Semaphore = asyncio.Semaphore(2)
+        self._result_send_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._pending: dict[str, asyncio.Task] = {}
         self._recall_tasks: set[asyncio.Task] = set()
         self._input_sessions: dict[str, InputSession] = {}
         self._input_session_keys_by_stream: dict[str, set[str]] = {}
         self._input_session_keys_by_user: dict[str, set[str]] = {}
         self._config_write_lock: asyncio.Lock = asyncio.Lock()
-        self._file_consume_lock: asyncio.Lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task | None = None
         self._cache_dir: Path | None = None
         self._workflows: list[WorkflowItemSection] = []
         self._user_requests: dict[str, list[float]] = {}
+        self._user_submitting: dict[str, int] = {}
         self._task_meta: dict[str, dict[str, str]] = {}
         self._cancel_choices: dict[str, list[str]] = {}
         self._task_history: list[dict[str, str]] = []
@@ -205,6 +215,7 @@ class RunningHubGenericPlugin(Star):
         self._prompt_library: dict[str, dict[str, list[dict[str, Any]]]] = {}
         self._prompt_library_lock: asyncio.Lock = asyncio.Lock()
         self._prompt_interactions: dict[str, PromptInteraction] = {}
+        self._media_store = None
 
     def _event_ctx(self, event: AstrMessageEvent) -> dict[str, str]:
         """把 AstrBot 事件转换为业务层使用的扁平上下文。"""
@@ -218,6 +229,7 @@ class RunningHubGenericPlugin(Star):
     def _mark_handled(self, event: AstrMessageEvent) -> None:
         """标记事件已被插件消费，阻止默认 LLM 流程继续响应。"""
         event.set_extra("runninghub_consumed", True)
+        # AstrBot's flag means "forbid the default LLM request" despite its name.
         event.should_call_llm(True)
         event.stop_event()
 
@@ -334,19 +346,10 @@ class RunningHubGenericPlugin(Star):
             return [str(w.name or "").strip() for w in self._workflows if str(w.name or "").strip()]
 
     def _is_llm_callable_workflow(self, workflow: WorkflowItemSection) -> bool:
-        """判断工作流是否支持 LLM 工具调用。
-
-        仅支持「只有主提示词 + 可选固定默认值」的工作流：无文件节点（图片/音频/视频），
-        无可编辑配置节点（text）。
-        """
-        prompt_count = 0
-        for node in self._ordered_nodes(workflow):
-            vtype = self._resolve_value_type(node)
-            if vtype == "prompt":
-                prompt_count += 1
-            elif vtype in ("image", "audio", "video", "text"):
-                return False
-        return prompt_count == 1
+        """自然语言可选择所有显式开启的有效工作流，包括图片和参数输入。"""
+        nodes = self._ordered_nodes(workflow)
+        return bool(workflow.llm_enabled and workflow.workflow_id.strip() and nodes
+                    and sum(self._resolve_value_type(n) == "prompt" for n in nodes) <= 1)
 
     def _llm_callable_workflow_names(self) -> list[str]:
         """返回支持 LLM 工具调用的工作流名称列表。"""
@@ -576,12 +579,17 @@ class RunningHubGenericPlugin(Star):
 
     async def _cleanup_cache_loop(self) -> None:
         """定时清理缓存目录（保留 24 小时内文件，每 6 小时执行一次）。"""
-        interval = 6 * 3600
+        interval = 60
         max_age = 24 * 3600
+        next_file_cleanup = 0.0
         while True:
             try:
                 await asyncio.sleep(5)
-                self._cleanup_cache_once(max_age_seconds=max_age)
+                if time.monotonic() >= next_file_cleanup:
+                    self._cleanup_cache_once(max_age_seconds=max_age)
+                    next_file_cleanup = time.monotonic() + 6 * 3600
+                if self._media_store is not None:
+                    self._media_store.prune()
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 raise
@@ -612,25 +620,12 @@ class RunningHubGenericPlugin(Star):
     # ── 配置校验 ──────────────────────────────────────────────────
 
     def _validate_workflows(self) -> None:
-        """校验配置约束：总节点最多 32 个、无默认值的文字节点仅一个生效。"""
+        """旧配置保留供管理员修复；运行前仍会拒绝不合法的节点。"""
         for workflow in self._workflows:
-            nodes = [n for n in workflow.input_nodes if str(n.node_id or "").strip()]
-            if len(nodes) > _MAX_NODES:
-                self.logger.warning(
-                    "工作流 %s 输入节点 %d 个，超过 %d 个上限，多余节点将被忽略",
-                    workflow.name, len(nodes), _MAX_NODES,
-                )
-            empty_text_nodes = [
-                n for n in nodes
-                if not str(n.field_value or "").strip()
-                and self._resolve_value_type(n) == "text"
-            ]
-            if len(empty_text_nodes) > 1:
-                self.logger.warning(
-                    "工作流 %s 有 %d 个无默认值的文字节点，仅第一个接收命令文本，其余将被跳过",
-                    workflow.name,
-                    len(empty_text_nodes),
-                )
+            for error in _validation_lib.workflow_errors(workflow):
+                self.logger.warning("配置需修正：%s", error["message"])
+            if len(workflow.input_nodes) > _MAX_NODES:
+                self.logger.warning("工作流 %s 超过 %d 个节点上限", workflow.name, _MAX_NODES)
 
     # ── 内部工具方法 ──────────────────────────────────────────────
 
@@ -665,7 +660,7 @@ class RunningHubGenericPlugin(Star):
                 return workflow
         return None
 
-    def _check_access(self, user_id: str, group_id: str) -> tuple[bool, str]:
+    def _check_access(self, user_id: str, group_id: str, *, check_quota: bool = True) -> tuple[bool, str]:
         """访问控制：白名单 + 每用户每小时频率限制。
 
         默认（未配置任何限制）返回 (True, "")，与旧版行为完全一致；
@@ -685,13 +680,13 @@ class RunningHubGenericPlugin(Star):
             if gid not in allowed_groups:
                 return False, "当前群组没有使用本插件的权限"
 
-        if cfg.max_per_user_per_hour > 0:
+        if check_quota and cfg.max_per_user_per_hour > 0:
             if not uid:
                 return False, "无法识别用户身份，已阻止本次请求（已开启频率限制）"
             now = time.time()
             bucket = self._user_requests.setdefault(uid, [])
             bucket[:] = [t for t in bucket if now - t < 3600]
-            if len(bucket) >= cfg.max_per_user_per_hour:
+            if len(bucket) + self._user_submitting.get(uid, 0) >= cfg.max_per_user_per_hour:
                 return False, "你本小时的生成次数已达上限，请稍后再试"
             # 计数移到提交成功后（_submit_and_poll），失败 / 识别等非生成请求不占额度
             # 桶数超阈值时清理空桶，避免一次性用户导致字典无限增长
@@ -864,17 +859,7 @@ class RunningHubGenericPlugin(Star):
     @staticmethod
     def _resolve_value_type(node: InputNodeSection) -> str:
         """解析节点类型：显式选择优先，留空时按字段名自动推断。"""
-        explicit = str(node.value_type or "").strip().lower()
-        if explicit in ("default", "text", "image", "audio", "video", "prompt"):
-            return explicit
-        field_name = str(node.field_name or "").lower()
-        if any(k in field_name for k in ("image", "pic", "photo", "img")):
-            return "image"
-        if any(k in field_name for k in ("audio", "voice", "sound", "music", "speech")):
-            return "audio"
-        if any(k in field_name for k in ("video", "mp4", "mov", "webm", "clip")):
-            return "video"
-        return "text"
+        return _validation_lib.resolve_value_type(node)
 
     def _build_node_info_list(
         self,
@@ -953,6 +938,7 @@ class RunningHubGenericPlugin(Star):
                     "field_name": field_name,
                     "value_type": vtype,
                     "label": node.label.strip() or node_id,
+                    "required": node.required,
                 }
             )
         return node_info_list, waiting
@@ -970,6 +956,11 @@ class RunningHubGenericPlugin(Star):
                     "field_name": node.field_name.strip() or "prompt",
                     "field_value": str(node.field_value or ""),
                     "label": str(node.label or "").strip() or node_id,
+                    "required": node.required,
+                    "param_type": node.param_type,
+                    "minimum": node.minimum,
+                    "maximum": node.maximum,
+                    "choices": node.choices,
                 }
             )
         return result
@@ -1000,6 +991,21 @@ class RunningHubGenericPlugin(Star):
         if workflow is None:
             available = "、".join(w.name for w in self._workflows if w.name) or "（空）"
             return {"success": False, "message": f"未找到工作流「{workflow_name}」，已配置：{available}"}
+
+        config_errors = _validation_lib.workflow_errors(workflow)
+        if config_errors:
+            return {"success": False, "message": config_errors[0]["message"] + "，请管理员修改配置"}
+
+        # Natural-language overrides are validated by ChatWorkflowMixin. Use a
+        # per-run copy so one user's parameters never change shared config.
+        natural = bool(kwargs.get("natural"))
+        overrides = kwargs.pop("node_overrides", {})
+        if natural:
+            workflow = workflow.model_copy(deep=True)
+            for node in workflow.input_nodes:
+                key = _chat_lib.node_key(node)
+                if key in overrides:
+                    node.field_value = overrides[key]
 
         if not workflow.workflow_id.strip():
             return {"success": False, "message": f"工作流「{workflow.name}」未配置 workflow_id"}
@@ -1035,6 +1041,13 @@ class RunningHubGenericPlugin(Star):
                 "message": f"工作流「{workflow.name}」已没有主提示词节点，无法复用该提示词",
             }
         editable_nodes = self._editable_config_nodes(workflow)
+        if natural:
+            # Defaults and explicit parameters are already known; only missing
+            # required values need an interactive follow-up.
+            required_keys = {_chat_lib.node_key(n) for n in self._ordered_nodes(workflow)
+                             if n.required and not n.field_value.strip()}
+            editable_nodes = [n for n in editable_nodes
+                              if f"{n['node_id']}/{n['field_name']}" in required_keys]
         # 存在无默认值的 prompt 节点且用户没给描述：不能直接提交，先交互收集描述
         missing_prompt_text = bool(text_node is not None and not command_text)
         # 会话中需要回填文字的目标节点：给了文本或需要补文本时才记录
@@ -1046,6 +1059,14 @@ class RunningHubGenericPlugin(Star):
             command_text,
             enhanced_text=reused_prompt or None,
         )
+        if natural:
+            # Unspecified optional parameters retain the cloud workflow's own
+            # defaults. Explicit empty strings still override text parameters.
+            omitted = {_chat_lib.node_key(n) for n in self._ordered_nodes(workflow)
+                       if self._resolve_value_type(n) == "text" and not n.required
+                       and not n.field_value and _chat_lib.node_key(n) not in overrides}
+            node_info_list = [n for n in node_info_list
+                              if f"{n['nodeId']}/{n['fieldName']}" not in omitted]
 
         if not node_info_list and not waiting and not editable_nodes and not missing_prompt_text:
             return {"success": False, "message": f"工作流「{workflow.name}」未配置任何输入节点"}
@@ -1065,6 +1086,7 @@ class RunningHubGenericPlugin(Star):
                 editable_nodes=editable_nodes,
                 chat_info=chat_info,
                 phase="files" if waiting else "text",
+                execution_context=kwargs,
             )
             if waiting:
                 tips = self._build_waiting_tips(waiting)
@@ -1076,13 +1098,13 @@ class RunningHubGenericPlugin(Star):
                     "success": True,
                     "waiting": True,
                     "required_files": required_files,
-                    "message": f"请上传：{tips}（可只传部分，发「跳过剩余」直接开始；上传后还需补充描述文本）",
+                    "message": self._input_prompt(session),
                 }
             return {
                 "success": True,
                 "waiting": True,
                 "required_files": [],
-                "message": f"工作流「{workflow.name}」需要描述文本，请直接发送要生成的内容",
+                "message": f"工作流「{workflow.name}」需要描述文本，请直接发送要生成的内容。{self._input_controls(session)}",
             }
 
         if waiting or editable_nodes:
@@ -1099,6 +1121,7 @@ class RunningHubGenericPlugin(Star):
                 text_field_name=session_text_node.field_name.strip() if session_text_node else "",
                 editable_nodes=editable_nodes,
                 chat_info=chat_info,
+                execution_context=kwargs,
             )
             if waiting:
                 tips = self._build_waiting_tips(waiting)
@@ -1110,11 +1133,11 @@ class RunningHubGenericPlugin(Star):
                     "success": True,
                     "waiting": True,
                     "required_files": required_files,
-                    "message": f"请上传：{tips}（可只传部分，发「跳过剩余」直接开始）",
+                    "message": self._input_prompt(session),
                 }
             # 无文件但需确认可编辑配置：直接进入配置确认
-            await self._ask_config_edit(session, stream_id)
-            return {"success": True, "waiting": True, "required_files": [], "message": "请确认配置"}
+            session.phase = "config"
+            return {"success": True, "waiting": True, "required_files": [], "message": self._config_prompt(session)}
 
         # 无文件、无可编辑配置：立即扩写并回填文字节点（用户输入优先，目标为第一个 prompt 节点）
         final_prompt = reused_prompt or command_text
@@ -1148,21 +1171,45 @@ class RunningHubGenericPlugin(Star):
         kwargs: dict,
     ) -> dict[str, Any]:
         """提交任务并启动后台轮询。"""
+        acquired = False
+        reserved_uid = ""
         try:
             await self._semaphore.acquire()
+            acquired = True
+            allowed, deny_msg = self._check_access(str(kwargs.get("user_id") or ""), str(kwargs.get("group_id") or ""))
+            if not allowed:
+                self._semaphore.release()
+                acquired = False
+                return {"success": False, "message": deny_msg}
+            if self.config.access.max_per_user_per_hour > 0:
+                reserved_uid = str(kwargs.get("user_id") or "")
+                self._user_submitting[reserved_uid] = self._user_submitting.get(reserved_uid, 0) + 1
             task_id = await client.submit(
                 node_info_list,
                 instance_type=workflow.instance_type,
                 workflow_id=workflow.workflow_id.strip(),
             )
         except RunningHubError as exc:
-            self._semaphore.release()
+            if acquired:
+                self._semaphore.release()
             self.logger.error("提交任务失败: %s", exc)
-            return {"success": False, "message": f"提交任务失败：{exc}"}
+            return {"success": False, "submission_attempted": True, "message": f"提交任务失败：{exc}"}
         except Exception as exc:
-            self._semaphore.release()
+            if acquired:
+                self._semaphore.release()
             self.logger.error("提交任务异常: %s", exc, exc_info=True)
-            return {"success": False, "message": f"提交任务异常：{exc}"}
+            return {"success": False, "submission_attempted": True, "message": f"提交任务异常：{exc}"}
+        except asyncio.CancelledError:
+            if acquired:
+                self._semaphore.release()
+            raise
+        finally:
+            if reserved_uid:
+                remaining = self._user_submitting.get(reserved_uid, 1) - 1
+                if remaining:
+                    self._user_submitting[reserved_uid] = remaining
+                else:
+                    self._user_submitting.pop(reserved_uid, None)
 
         # 提交成功才计入每用户每小时频率（失败 / 识别等非生成请求不占额度）
         if self.config.access.max_per_user_per_hour > 0:
@@ -1190,6 +1237,10 @@ class RunningHubGenericPlugin(Star):
             "user_id": str(kwargs.get("user_id") or ""),
             "platform_id": str(kwargs.get("platform_id") or ""),
         }
+        try:
+            self._remember_workflow_run(task_id, workflow, node_info_list, stream_id, kwargs)
+        except Exception as exc:
+            self.logger.warning("任务已提交，但复用记录保存失败: %s", exc)
         return {
             "success": True,
             "task_id": task_id,
@@ -1205,20 +1256,38 @@ class RunningHubGenericPlugin(Star):
 
     @staticmethod
     def _format_waiting_summary(waiting: list[dict[str, Any]]) -> str:
-        _NAME_UNIT = {"image": ("图片", "张"), "audio": ("音频", "段"), "video": ("视频", "段")}
-        counts: dict[str, int] = {}
-        order: list[str] = []
-        for item in waiting:
-            vtype = item["value_type"]
-            if vtype not in counts:
-                counts[vtype] = 0
-                order.append(vtype)
-            counts[vtype] += 1
-        parts: list[str] = []
-        for vtype in order:
-            name, unit = _NAME_UNIT.get(vtype, (vtype, "个"))
-            parts.append(f"{name} {counts[vtype]} {unit}")
-        return "、".join(parts)
+        names = {"image": "图片", "audio": "音频", "video": "视频"}
+        lines = []
+        for index, item in enumerate(waiting, 1):
+            required = item.get("required", getattr(item.get("node"), "required", False))
+            role = item.get("label") or item.get("node_id") or "素材"
+            lines.append(f"{index}. {role}（{names.get(item['value_type'], '文件')}，{'必填' if required else '可跳过'}）")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _input_controls(session: InputSession) -> str:
+        remaining = max(0, int((_INPUT_WAIT_TIMEOUT - (time.time() - session.created_at) + 59) // 60))
+        return f"请在 {remaining} 分钟内完成；取消：/wf中断"
+
+    def _input_prompt(self, session: InputSession) -> str:
+        lines = [f"工作流「{session.workflow.name}」尚未提交。"]
+        if session.received_labels:
+            lines.append("已准备：" + "、".join(session.received_labels))
+        lines.extend(["还需按顺序发送：", self._format_waiting_summary(session.waiting_nodes)])
+        if any(not n.get("required") for n in session.waiting_nodes):
+            lines.append("可选素材不需要时回复「跳过剩余」；必填素材不能跳过。")
+        if not session.command_text and session.text_node_id:
+            lines.append("素材收齐后还需补充描述。")
+        lines.append(self._input_controls(session))
+        return "\n".join(lines)
+
+    def _config_prompt(self, session: InputSession, notice: str = "") -> str:
+        missing = any(n.get("required") and not n["field_value"].strip() for n in session.editable_nodes)
+        lines = [notice] if notice else []
+        lines += ["请填写以下参数：" if missing else "请确认以下参数：", self._build_config_edit_tips(session.editable_nodes)]
+        lines.append("按顺序回复，用空格分隔；必填空项必须填写。" if missing else "按顺序回复，用空格分隔；单项用「-」保留默认，回复「不变」全部保留。")
+        lines.append(self._input_controls(session))
+        return "\n".join(lines)
 
     def _create_input_session(
         self,
@@ -1235,6 +1304,7 @@ class RunningHubGenericPlugin(Star):
         editable_nodes: list[dict[str, str]] | None = None,
         chat_info: dict[str, str] | None = None,
         phase: str = "files",
+        execution_context: dict[str, Any] | None = None,
     ) -> InputSession:
         """创建交互式收集会话（同一用户可在不同会话各有一份，工具路径回退按 stream 定位）。"""
         session = InputSession(
@@ -1247,6 +1317,7 @@ class RunningHubGenericPlugin(Star):
                     "field_name": item["field_name"],
                     "value_type": item["value_type"],
                     "label": item["label"],
+                    "required": item.get("required", getattr(item.get("node"), "required", False)),
                 }
                 for item in waiting_nodes
             ],
@@ -1258,7 +1329,12 @@ class RunningHubGenericPlugin(Star):
             editable_nodes=editable_nodes or [],
             chat_info=chat_info or {},
             phase=phase,
+            execution_context=dict(execution_context or {}),
         )
+        collected_keys = {f"{n['nodeId']}/{n['fieldName']}" for n in collected}
+        session.received_labels = [n.label or _chat_lib.node_key(n) for n in self._ordered_nodes(workflow)
+                                   if self._resolve_value_type(n) in {"image", "audio", "video"}
+                                   and _chat_lib.node_key(n) in collected_keys]
         key = self._register_input_session(session)
 
         async def _expire() -> None:
@@ -1370,7 +1446,7 @@ class RunningHubGenericPlugin(Star):
         if not files:
             await self._send_text(
                 stream_id,
-                "请发送图片/语音/视频，或回复“跳过剩余”",
+                self._input_prompt(session),
             )
             return True
 
@@ -1400,7 +1476,9 @@ class RunningHubGenericPlugin(Star):
         这里按内容 SHA-256 去重，并且只在本次调用确实消费了新文件时才
         发送「已收到，还剩余…」汇总，避免连发两条。
         """
-        async with self._file_consume_lock:
+        async with session.consume_lock:
+            if self._input_sessions.get(key) is not session:
+                return True
             consumed_any = False
             for file_type, source in files:
                 index = next(
@@ -1414,8 +1492,10 @@ class RunningHubGenericPlugin(Star):
                     file_data = await self._fetch_file_bytes(source)
                 except Exception as exc:
                     self.logger.error("读取待上传文件失败: %s", exc)
-                    await self._send_text(stream_id, f"文件上传失败：{exc}")
+                    await self._send_text(stream_id, f"「{session.waiting_nodes[index]['label']}」读取失败，请重新发送该文件；其他已收文件保留。")
                     continue
+                if self._input_sessions.get(key) is not session:
+                    return True
                 digest = hashlib.sha256(file_data).hexdigest()
                 if digest in session.received_hashes:
                     # notice 和普通消息投递的同一个文件，只处理一次
@@ -1430,9 +1510,12 @@ class RunningHubGenericPlugin(Star):
                     session.received_hashes.discard(digest)
                     session.waiting_nodes.insert(index, node)
                     self.logger.error("上传文件到 RunningHub 失败: %s", exc)
-                    await self._send_text(stream_id, f"文件上传失败：{exc}")
+                    await self._send_text(stream_id, f"「{node['label']}」上传失败，请重新发送该文件；其他已收文件保留。")
                     continue
+                if self._input_sessions.get(key) is not session:
+                    return True
                 consumed_any = True
+                session.received_labels.append(node["label"])
                 session.collected.append(
                     {
                         "nodeId": node["node_id"],
@@ -1440,6 +1523,17 @@ class RunningHubGenericPlugin(Star):
                         "fieldValue": file_name,
                     }
                 )
+                if file_type == "image":
+                    try:
+                        ctx = {**session.chat_info, "stream_id": session.stream_id, "user_id": session.user_id}
+                        store = self._get_media_store()
+                        ref = store.remember(store.owner(ctx), source, data=file_data,
+                                             position=session.uploaded_images + 1)
+                        session.execution_context.setdefault("image_bindings", {})[
+                            f"{node['node_id']}/{node['field_name']}"
+                        ] = ref["ref"]
+                    except Exception as exc:
+                        self.logger.warning("上传成功，但参考图片记录失败: %s", exc)
                 if file_type == "image":
                     session.uploaded_images += 1
                 elif file_type == "audio":
@@ -1454,7 +1548,7 @@ class RunningHubGenericPlugin(Star):
             if session.waiting_nodes:
                 await self._send_text(
                     stream_id,
-                    f"已收，还需：{self._build_waiting_tips_from_dicts(session.waiting_nodes)}（或“跳过剩余”）",
+                    self._input_prompt(session),
                 )
                 return True
 
@@ -1465,12 +1559,7 @@ class RunningHubGenericPlugin(Star):
     async def _ask_config_edit(self, session: InputSession, stream_id: str, notice: str = "") -> None:
         """进入可编辑配置确认阶段并向用户发确认提示。"""
         session.phase = "config"
-        tips = self._build_config_edit_tips(session.editable_nodes)
-        prefix = f"{notice}。" if notice else ""
-        await self._send_text(
-            stream_id,
-            f"{prefix}可改：\n{tips}\n回复新值；“-”默认，“不变”全默认",
-        )
+        await self._send_text(stream_id, self._config_prompt(session, notice))
 
     async def _after_files_collected(
         self,
@@ -1485,7 +1574,7 @@ class RunningHubGenericPlugin(Star):
             session.phase = "text"
             await self._send_text(
                 stream_id,
-                f"{notice}。请发送描述文本：",
+                f"{notice}。请发送描述文本。{self._input_controls(session)}",
             )
             return
         if session.editable_nodes:
@@ -1498,7 +1587,16 @@ class RunningHubGenericPlugin(Star):
         """构建可编辑配置的确认提示。"""
         lines = []
         for index, node in enumerate(editable_nodes, 1):
-            lines.append(f"{index}.{node['label']}：{node['field_value']}")
+            value = node["field_value"] or ("必填，尚未填写" if node.get("required") else "未设置")
+            constraints = []
+            if node.get("minimum") is not None:
+                constraints.append(f"至少 {node['minimum']:g}")
+            if node.get("maximum") is not None:
+                constraints.append(f"至多 {node['maximum']:g}")
+            if node.get("choices"):
+                constraints.append("可选 " + " / ".join(node["choices"]))
+            suffix = f"（{'；'.join(constraints)}）" if constraints else ""
+            lines.append(f"{index}. {node['label']}：{value}{suffix}")
         return "\n".join(lines)
 
     @staticmethod
@@ -1563,10 +1661,21 @@ class RunningHubGenericPlugin(Star):
         if not text.strip() and await self._extract_files_from_event(event):
             await self._send_text(
                 stream_id,
-                "请回复配置值（如“512 16:9”）或“不变”",
+                self._config_prompt(session),
             )
             return
         values = self._parse_config_edit(text, len(session.editable_nodes))
+        # Validate before changing any collected values or submitting a task.
+        try:
+            schema = {_chat_lib.node_key(n): n for n in self._ordered_nodes(session.workflow)}
+            for index, item in enumerate(session.editable_nodes):
+                candidate = values[index] if index < len(values) and values[index] is not None else item["field_value"]
+                normalized = _chat_lib.parameter_value(schema[f"{item['node_id']}/{item['field_name']}"], candidate)
+                if index < len(values) and values[index] is not None:
+                    values[index] = normalized
+        except ValueError as exc:
+            await self._send_text(stream_id, str(exc) + "，请重新填写")
+            return
         for index, node in enumerate(session.editable_nodes):
             if index < len(values) and values[index] is not None:
                 self._patch_text_value(
@@ -1593,7 +1702,9 @@ class RunningHubGenericPlugin(Star):
         client: RunningHubClient,
         notice: str,
     ) -> None:
-        """提交已收集的输入（会话已从 _input_sessions 移除）。"""
+        """领取并提交已收集的输入，同一会话只允许提交一次。"""
+        if self._input_sessions.get(key) is not session:
+            return
         self._remove_input_session(key)
         if session.expire_task is not None:
             session.expire_task.cancel()
@@ -1620,9 +1731,9 @@ class RunningHubGenericPlugin(Star):
                 final_prompt,
             )
 
-        await self._send_text(stream_id, notice)
         # 用触发时的 chat_info 构造扁平 kwargs，_extract_chat_info 能识别，恢复 NapCat 直发与自动撤回
         kwargs = {
+            **session.execution_context,
             "group_id": str(session.chat_info.get("group_id") or ""),
             "user_id": str(session.chat_info.get("user_id") or ""),
             "platform_id": str(session.chat_info.get("platform_id") or ""),
@@ -1638,10 +1749,7 @@ class RunningHubGenericPlugin(Star):
                 user_id=str(session.chat_info.get("user_id") or session.user_id),
                 platform_id=str(session.chat_info.get("platform_id") or ""),
             )
-        if not result["success"]:
-            await self._send_text(stream_id, result["message"])
-        else:
-            await self._send_text(stream_id, result["message"])
+        await self._send_text(stream_id, result["message"])
 
     async def _finish_input_session(
         self,
@@ -1654,6 +1762,9 @@ class RunningHubGenericPlugin(Star):
         session = self._find_input_session(user_id, stream_id)
         if session is None:
             return False
+        if session.consume_lock.locked():
+            await self._send_text(stream_id, "文件正在上传，请等待处理完成；如需取消，请发送 /wf中断")
+            return True
         key = self._session_key(session.user_id, session.stream_id)
         region = str(session.workflow.region or "overseas").strip()
         client = self._get_client(region)
@@ -1665,12 +1776,17 @@ class RunningHubGenericPlugin(Star):
             await self._send_text(stream_id, "插件客户端未初始化，已取消本次任务")
             return True
         skipped = len(session.waiting_nodes)
+        required = {_chat_lib.node_key(n) for n in self._ordered_nodes(session.workflow) if n.required}
+        missing = [n["label"] for n in session.waiting_nodes
+                   if f"{n['node_id']}/{n['field_name']}" in required]
+        if missing:
+            await self._send_text(stream_id, "还缺少必填文件：" + "、".join(missing) + "，请发送文件或 /wf中断")
+            return True
         if skipped:
             notice = f"已跳过剩余 {skipped} 个文件"
-            await self._send_text(stream_id, f"收到，{notice}，正在准备提交…")
+            session.waiting_nodes.clear()
         else:
             notice = "输入已收齐"
-            await self._send_text(stream_id, "收到，输入已收齐，正在准备提交…")
         await self._after_files_collected(session, key, stream_id, client, notice)
         return True
 
@@ -2238,13 +2354,14 @@ class RunningHubGenericPlugin(Star):
             except (RunningHubError, TimeoutError) as exc:
                 self.logger.error("任务 %s 未成功完成: %s", task_id, exc)
                 if stream_id:
-                    await self._send_text(stream_id, "哦不好意思，任务运行失败了")
+                    await self._send_text(stream_id, f"任务 {task_id} 等待超时，尚未确认生成结果。请到 RunningHub 核对任务状态，避免重复生成。" if isinstance(exc, TimeoutError) else f"任务 {task_id} 未成功取得生成结果，请到 RunningHub 查看任务状态和失败原因。")
                 return
 
             # 任务成功后立即记录消耗（只存 task_id / 工作流 / RH 币）
-            await self._record_task_history(
-                task_id, workflow_name, self._consume_coins_from_result(result)
-            )
+            try:
+                await self._record_task_history(task_id, workflow_name, self._consume_coins_from_result(result))
+            except Exception as exc:
+                self.logger.warning("记录任务消耗失败: %s", exc)
 
 
             result_items: list[tuple[str, str]] = []
@@ -2260,76 +2377,32 @@ class RunningHubGenericPlugin(Star):
                 result_items.append((url, output_type))
             if not result_items:
                 if stream_id:
-                    await self._send_text(stream_id, "哦不好意思，任务没有返回结果")
+                    await self._send_text(stream_id, f"任务 {task_id} 已结束，但未返回可发送的结果，请检查工作流输出节点。")
                 return
 
-            cleanup_cfg = self.config.feature
-            recall_seconds = cleanup_cfg.recall_seconds
-            should_cleanup = bool(cleanup_cfg.enable and recall_seconds and recall_seconds > 0)
-
-            appended_result = False
-            for index, (url, output_type) in enumerate(result_items):
-                if self._is_image_url(url, output_type):
-                    try:
-                        image_base64 = await client.download_base64(url)
-                    except Exception as exc:
-                        self.logger.error("下载结果失败 %s: %s", url, exc)
-                        if stream_id:
-                            await self._send_text(stream_id, f"第 {index + 1} 个结果下载失败：{exc}")
-                        continue
-                    if stream_id:
-                        message_id = await self._send_image_with_id(
-                            image_base64,
-                            stream_id,
-                            chat_info=chat_info,
-                            need_message_id=should_cleanup,
-                        )
-                        self.logger.info(
-                            "已发送结果 %d/%d (task_id=%s message_id=%s)",
-                            index + 1,
-                            len(result_items),
-                            task_id,
-                            message_id or "无",
-                        )
-                        if should_cleanup and message_id:
-                            self._schedule_recall(
-                                message_id, recall_seconds, platform_id=chat_info.get("platform_id")
-                            )
-                        # 追加到 LLM 聊天上下文：让 LLM 能看到并记住自己生成的图片
-                        await self._append_result_to_llm_context(
-                            stream_id,
-                            [{"type": "image", "binary_data_base64": image_base64, "description": "RunningHub 生成结果"}],
-                            visible_text="[生成结果] 图片已生成",
-                        )
-                        appended_result = True
-                elif self._is_video_url(url, output_type) and stream_id:
-                    video_message_id = await self._send_video_with_id(
-                        url, stream_id, chat_info=chat_info, need_message_id=should_cleanup
-                    )
-                    if should_cleanup and video_message_id:
-                        self._schedule_recall(
-                            video_message_id, recall_seconds, platform_id=chat_info.get("platform_id")
-                        )
-                    # 视频无法直接给 LLM 看，追加链接文本，让 LLM 知道生成了什么
-                    await self._append_result_to_llm_context(
-                        stream_id,
-                        [{"type": "text", "data": url}],
-                        visible_text=f"[生成结果] 视频已生成：{url}",
-                    )
-                    appended_result = True
-                elif stream_id:
-                    await self._send_text(stream_id, f"任务结果 {index + 1}：{url}")
-
-            # 命令路径追加一条确认消息；LLM 工具路径由 Agent 继续生成回复
-            if appended_result and str(kwargs.get("trigger") or "") != "tool":
-                await self._trigger_llm_result_reply(stream_id)
+            record = {
+                "owner": _chat_lib.MediaStore.owner({**(kwargs or {}), "stream_id": stream_id}),
+                "task_id": task_id, "workflow": workflow_name, "region": task_meta.get("region", "overseas"),
+                "outputs": [{"url": url, "type": kind, "sent": False, "image_ref": ""} for url, kind in result_items],
+                "saved": False,
+            }
+            try:
+                if record["owner"]:
+                    record["saved"] = True
+                    self._get_media_store().remember_delivery(**record)
+            except Exception as exc:
+                record["saved"] = False
+                self.logger.warning("保存补发记录失败: %s", exc)
+            if stream_id:
+                target = DeliveryTarget.from_dict({**chat_info, "stream_id": stream_id})
+                await self._deliver_saved_results(record, target, client)
         except asyncio.CancelledError:
             self.logger.info("任务 %s 已被取消", task_id)
             raise
         except Exception as exc:
             self.logger.error("任务 %s 处理异常: %s", task_id, exc, exc_info=True)
             if stream_id:
-                await self._send_text(stream_id, "哦不好意思，处理结果时出了点问题")
+                await self._send_text(stream_id, f"任务 {task_id} 处理结果时发生异常；若已有结果记录，可使用 /wf补发 {task_id}。详细原因已记录日志。")
         finally:
             self._pending.pop(task_id, None)
             self._task_meta.pop(task_id, None)
@@ -2455,6 +2528,11 @@ class RunningHubGenericPlugin(Star):
 
     # ── 命令 / 工具 / API 组件 ────────────────────────────────────
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
+    async def remember_chat_images(self, event: AstrMessageEvent) -> None:
+        """记录本会话用户图片；不消费消息、不主动调用模型。"""
+        await self._observe_chat_images(event)
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
     async def handle_input_collector(self, event: AstrMessageEvent) -> None:
         """拦截交互式输入会话中的文件 / 控制词消息，阻止其继续进入 LLM。"""
@@ -2464,6 +2542,11 @@ class RunningHubGenericPlugin(Star):
             return
         user_id = str(event.get_sender_id() or "")
         stream_id = str(event.unified_msg_origin or "")
+        text = self._extract_text_from_event(event).strip()
+        if re.match(r"^/?wf中断(?:\s|$)", text):
+            return
+        if text.startswith("/") and not self._is_finish_signal(text):
+            return
         interaction = self._prompt_interactions.get(self._session_key(user_id, stream_id))
         if interaction is not None and await self._handle_prompt_interaction(
             interaction, event
@@ -2657,6 +2740,14 @@ class RunningHubGenericPlugin(Star):
             )
         self._mark_handled(event)
 
+    @filter.command("wf补发")
+    async def handle_resend_result(self, event: AstrMessageEvent) -> None:
+        """补发本会话用户的已生成结果，不触发新任务。"""
+        if self._is_consumed(event):
+            return
+        self._mark_handled(event)
+        await self._resend_result_command(event)
+
     @filter.command("wf中断")
     async def handle_rh_cancel(self, event: AstrMessageEvent) -> None:
         """中断任务：还在传文件阶段则直接结束；已提交则回复编号取消运行中的任务。"""
@@ -2665,7 +2756,7 @@ class RunningHubGenericPlugin(Star):
         stream_id = str(event.unified_msg_origin or "")
         user_id = str(event.get_sender_id() or "")
         group_id = str(event.get_group_id() or "")
-        allowed, deny_msg = self._check_access(user_id, group_id)
+        allowed, deny_msg = self._check_access(user_id, group_id, check_quota=False)
         if not allowed:
             await self._send_text(stream_id, deny_msg)
             self._mark_handled(event)
@@ -3163,6 +3254,9 @@ class RunningHubGenericPlugin(Star):
         self, items: list[WorkflowItemSection]
     ) -> dict[str, Any]:
         """把工作流列表写入 AstrBot 配置并热更新当前实例（识别 / 可视化页面共用）。"""
+        errors = [error["message"] for item in items for error in _validation_lib.workflow_errors(item)]
+        if errors:
+            raise ValueError("\n".join(errors))
         async with self._config_write_lock:
             temp = self.config.model_copy(deep=True)
             temp.workflows.items = [
@@ -3293,21 +3387,15 @@ class RunningHubGenericPlugin(Star):
         self._mark_handled(event)
 
     def _refresh_llm_tool_description(self) -> None:
-        """把当前可自然语言调用的工作流名称注入 run_workflow 工具描述。"""
-        names = self._llm_callable_workflow_names()
-        name_list = (
-            "、".join(names)
-            if names
-            else "（当前没有支持自然语言调用的工作流，需是仅有提示词输入的工作流）"
-        )
+        """Only global workflow information belongs in the shared tool description."""
+        names = "、".join(self._llm_callable_workflow_names()) or "（无）"
         description = (
-            "运行仅支持自然语言调用的 RunningHub 工作流（文生图/文生视频等只有提示词输入的工作流）。"
-            f"当前支持的工作流名称：{name_list}。"
-            "workflow_name 必须从上述名称中精确选一个；prompt 填用户描述的内容（从用户原话提取，不要脑补）。"
-            "只在用户明确要求生成图片/视频时才调用。"
-            "调用后立即返回任务已提交，生成结果会异步自动发送到会话，你无需等待或轮询。"
-            "若描述列出的工作流里没有用户想要的，可能是工作流刚更新、工具描述未刷新，不要瞎填名称，"
-            "告诉用户「工作流列表可能已更新，请重新加载插件后再试」，或改用 /wf运行 命令。"
+            "根据用户明确的生成或修改要求运行 RunningHub 工作流，支持聊天图片、引用图片和参数。"
+            f"当前可用名称：{names}。"
+            "涉及图片、参数、继续修改或不确定工作流用途时，先调用 get_workflow_context。"
+            "用它返回的图片编号和输入 key，不得编造 URL、图片内容或参数。"
+            "修改生成结果时选择对应 generated 图片；沿用原参考图和参数时使用 reuse_task_id。"
+            "缺少素材时按工具返回提示补充；尚未提交不得声称已开始。每轮只提交一次，不要轮询。"
         )
         try:
             tool = self.context.get_llm_tool_manager().get_func("run_workflow")
@@ -3316,55 +3404,38 @@ class RunningHubGenericPlugin(Star):
         except Exception as exc:
             self.logger.debug("刷新 run_workflow 工具描述失败: %s", exc)
 
-    @filter.llm_tool("run_workflow")
-    async def handle_run_workflow(
-        self, event: AstrMessageEvent, workflow_name: str, prompt: str = ""
-    ) -> str:
-        """运行配置好的 RunningHub 工作流，提交提示词并生成结果（文生图/文生视频等）。
-        仅支持「只有提示词输入、无图片/音频/视频/配置输入」的工作流。
+    @filter.llm_tool("get_workflow_context")
+    async def handle_workflow_context(self, event: AstrMessageEvent) -> str:
+        """查看可用工作流用途、输入角色、参数约束、当前/引用/近期图片编号和可复用任务。
+        当用户要求生成、编辑图片或说“刚才那张”“生成的第二张”时先调用本工具。
+        图片列表不包含视觉描述，不得凭编号猜测画面。多图用途不明确时询问用户。
+        返回数据仅限当前会话用户；用户主动引用的图片也可使用。
 
         Args:
-            workflow_name(string): 要运行的工作流名称（必须从工具描述中列出的支持名称里精确选一个）
-            prompt(string): 要填入输入节点的描述文本（如提示词）；留空则使用配置的默认值
         """
-        kwargs = self._event_ctx(event)
-        kwargs["trigger"] = "tool"
-        workflow_name = str(workflow_name or "").strip()
-        prompt = str(prompt or "").strip()
-        names = self._llm_callable_workflow_names()
-        if not workflow_name:
-            return (
-                "请从以下支持自然语言调用的工作流名称中精确选一个填入 workflow_name，"
-                "并把用户想要生成的内容填入 prompt（从用户原话提取，不要脑补），然后再次调用本工具。"
-                "可选工作流：" + ("、".join(names) if names else "（无）")
-            )
-        if workflow_name not in names:
-            all_names = self._workflow_names()
-            if workflow_name in all_names:
-                reason = (
-                    f"工作流「{workflow_name}」包含图片/音频/视频/配置等输入节点，"
-                    "不支持自然语言调用，请让用户改用命令 /wf运行 手动运行"
-                )
-            else:
-                reason = f"工作流「{workflow_name}」未配置"
-            return (
-                reason + "。可选的自然语言调用工作流："
-                + ("、".join(names) if names else "（无）")
-                + "。请直接结束本轮思考，不要重复调用本工具。"
-            )
-        workflow = self._find_workflow(workflow_name)
-        if not prompt and workflow is not None and self._primary_prompt_node(workflow) is not None:
-            return (
-                f"工作流「{workflow_name}」的提示词节点没有默认值，"
-                "请把用户想要生成的内容填入 prompt 参数后再次调用本工具，不要创建任务。"
-            )
-        result = await self._start_workflow(workflow_name, prompt, **kwargs)
-        if not result["success"]:
-            return "错误：" + result["message"]
-        return (
-            "任务已提交并开始运行，task_id=" + str(result.get("task_id") or "") + "。"
-            "生成结果会异步自动发送到会话，你无需等待或轮询，请直接结束本轮思考，不要调用 wait。"
-        )
+        return await self._natural_context(event)
+
+    @filter.llm_tool("run_workflow")
+    async def handle_run_workflow(
+        self, event: AstrMessageEvent, workflow_name: str = "", prompt: str = "",
+        image_refs: list[str] | None = None,
+        image_bindings: dict[str, str] | None = None,
+        parameters: dict[str, Any] | None = None,
+        reuse_task_id: str = "",
+    ) -> str:
+        """按用户明确的生成/编辑要求运行工作流。涉及图片或参数时先调用 get_workflow_context。
+        每轮只运行一次；根据返回值区分等待补充和已提交，不要轮询。
+
+        Args:
+            workflow_name(string): 工作流名称，从 get_workflow_context 返回列表选择；复用任务时可留空
+            prompt(string): 用户完整的生成/修改要求；复用任务时只填本次修改要求，留空沿用原提示词
+            image_refs(array[string]): 单图工作流的图片编号；省略时使用当前消息或引用图片，空数组表示不用聊天图片
+            image_bindings(object): 多图角色绑定，key 为输入的 节点ID/字段名，value 为图片编号；与 image_refs 二选一
+            parameters(object): 用户明确要求修改的可编辑参数，key 为 节点ID/字段名，value 满足参数约束；固定节点不可修改
+            reuse_task_id(string): 从 get_workflow_context 选择原任务 ID，继承其提示词、参数和原参考图；修改生成结果需另外指定 generated 图片
+        """
+        return await self._run_natural_workflow(event, workflow_name, prompt, image_refs,
+                                                image_bindings, parameters, reuse_task_id)
 
     @staticmethod
     def _web_jsonify(payload: Any):
@@ -3698,6 +3769,11 @@ class RunningHubGenericPlugin(Star):
                         "value_type": str(node.value_type or ""),
                         "effective_type": self._resolve_value_type(node),
                         "label": str(node.label or ""),
+                        "required": node.required,
+                        "param_type": node.param_type,
+                        "minimum": node.minimum,
+                        "maximum": node.maximum,
+                        "choices": node.choices,
                     }
                 )
             workflows.append(
@@ -3708,6 +3784,8 @@ class RunningHubGenericPlugin(Star):
                     "region": str(workflow.region or "overseas"),
                     "llm_enhance": bool(workflow.llm_enhance),
                     "llm_template_path": str(workflow.llm_template_path or ""),
+                    "description": workflow.description,
+                    "llm_enabled": workflow.llm_enabled,
                     "nodes": nodes,
                 }
             )
@@ -3791,8 +3869,22 @@ class RunningHubGenericPlugin(Star):
                         "field_value": field_value,
                         "value_type": value_type,
                         "label": label,
+                        "required": bool(node_raw.get("required", False)),
+                        "param_type": str(node_raw.get("param_type") or "string"),
+                        "minimum": node_raw.get("minimum") if node_raw.get("minimum") != "" else None,
+                        "maximum": node_raw.get("maximum") if node_raw.get("maximum") != "" else None,
+                        "choices": node_raw.get("choices") or [],
                     }
                 )
+                try:
+                    node_model = InputNodeSection.model_validate(nodes[-1])
+                    node_error = _validation_lib.validate_node(node_model)
+                    if node_error:
+                        return [], f"工作流「{name}」第 {node_index} 项「{label or node_id}」({node_id}/{field_name})：{node_error}"
+                except ValueError as exc:
+                    return [], f"工作流「{name}」节点 {node_id}/{field_name} 参数约束无效：{exc}"
+            if len(str(raw.get("description") or "")) > 1000:
+                return [], f"工作流「{name}」用途说明不能超过 1000 字符"
             items.append(
                 WorkflowItemSection.model_validate(
                     {
@@ -3802,6 +3894,8 @@ class RunningHubGenericPlugin(Star):
                         "region": region,
                         "llm_enhance": llm_enhance,
                         "llm_template_path": llm_template_path,
+                        "description": str(raw.get("description") or ""),
+                        "llm_enabled": bool(raw.get("llm_enabled", True)),
                         "input_nodes": nodes,
                     }
                 )

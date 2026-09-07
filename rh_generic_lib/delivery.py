@@ -72,6 +72,14 @@ class DeliveryTarget:
         return cls(stream_id=str(stream_id or ""))
 
 
+@dataclass(frozen=True)
+class DeliveryReceipt:
+    """A successful send need not have a platform message ID."""
+    success: bool
+    message_id: str = ""
+    as_link: bool = False
+
+
 class BaseDeliveryChannel(ABC):
     """消息投递通道抽象。所有发送方法失败时都应当自行消化异常并返回失败值。"""
 
@@ -126,36 +134,32 @@ class GenericAstrBotChannel(BaseDeliveryChannel):
             return False
 
     async def send_image(self, target: DeliveryTarget, image_base64: str) -> str:
-        if not target.stream_id or not str(image_base64 or ""):
-            return ""
+        return (await self.send_image_result(target, image_base64)).message_id
+
+    async def send_image_result(self, target: DeliveryTarget, image_base64: str) -> DeliveryReceipt:
+        if not target.stream_id or not image_base64:
+            return DeliveryReceipt(False)
         try:
-            await self.context.send_message(
-                target.stream_id, MessageChain().base64_image(str(image_base64))
-            )
-            return ""
+            sent = await self.context.send_message(target.stream_id, MessageChain().base64_image(str(image_base64)))
+            return DeliveryReceipt(bool(sent))
         except Exception as exc:
             self.logger.warning("通用通道发送图片失败: %s", exc)
-            return ""
+            return DeliveryReceipt(False)
 
     async def send_video(self, target: DeliveryTarget, video_url: str) -> str:
-        if not target.stream_id or not str(video_url or ""):
-            return ""
+        return (await self.send_video_result(target, video_url)).message_id
+
+    async def send_video_result(self, target: DeliveryTarget, video_url: str) -> DeliveryReceipt:
+        if not target.stream_id or not video_url:
+            return DeliveryReceipt(False)
         try:
-            await self.context.send_message(
-                target.stream_id,
-                MessageChain([VideoComponent.fromURL(str(video_url))]),
-            )
-            return ""
+            sent = await self.context.send_message(target.stream_id, MessageChain([VideoComponent.fromURL(str(video_url))]))
+            if sent:
+                return DeliveryReceipt(True)
         except Exception as exc:
             self.logger.warning("通用通道发送视频失败，回退发送链接: %s", exc)
-        try:
-            await self.context.send_message(
-                target.stream_id, MessageChain().message(str(video_url))
-            )
-            return ""
-        except Exception as exc:
-            self.logger.warning("通用通道发送视频链接失败: %s", exc)
-            return ""
+        sent = await self.send_text(target, video_url)
+        return DeliveryReceipt(sent, as_link=sent)
 
     async def send_file(
         self, target: DeliveryTarget, file_url: str, filename: str = ""
@@ -258,7 +262,7 @@ class OneBotChannel(BaseDeliveryChannel):
                 params = {"user_id": int(user_id), "message": segments}
             else:
                 self.logger.warning("OneBot 直发缺少 group_id/user_id，改用通用通道")
-                return ""
+                return "", False
         except (TypeError, ValueError):
             self.logger.warning("group_id/user_id 不是数字，无法 OneBot 直发")
             return "", False
@@ -270,18 +274,17 @@ class OneBotChannel(BaseDeliveryChannel):
     async def send_text(self, target: DeliveryTarget, text: str) -> bool:
         if not str(text or ""):
             return False
-        message_id = await self._send(
-            target, [{"type": "text", "data": {"text": str(text)}}]
-        )
-        return bool(message_id)
+        _, sent = await self._send_with_status(target, [{"type": "text", "data": {"text": str(text)}}])
+        return sent
 
     async def send_image(self, target: DeliveryTarget, image_base64: str) -> str:
-        if not str(image_base64 or ""):
-            return ""
-        return await self._send(
-            target,
-            [{"type": "image", "data": {"file": f"base64://{image_base64}"}}],
-        )
+        message_id, _ = await self.send_image_with_status(target, image_base64)
+        return message_id
+
+    async def send_image_with_status(self, target: DeliveryTarget, image_base64: str) -> tuple[str, bool]:
+        if not image_base64:
+            return "", False
+        return await self._send_with_status(target, [{"type": "image", "data": {"file": f"base64://{image_base64}"}}])
 
     async def send_video(self, target: DeliveryTarget, video_url: str) -> str:
         message_id, _ = await self.send_video_with_status(target, video_url)
@@ -396,48 +399,37 @@ class Delivery:
             return await OneBotChannel(bot, self.logger).send_text(target, text)
         return False
 
-    async def send_image(
-        self, target: DeliveryTarget, image_base64: str, *, need_message_id: bool = False
-    ) -> str:
-        """发送图片并返回 message_id。
+    async def send_image(self, target: DeliveryTarget, image_base64: str, *, need_message_id: bool = False) -> str:
+        return (await self.send_image_result(target, image_base64, need_message_id=need_message_id)).message_id
 
-        OneBot/NapCat 优先发送视频；远程视频富媒体失败时自动改发文件，
-        两种 OneBot 方式都失败后再回退 AstrBot 通用通道。
-        """
+    async def send_image_result(self, target: DeliveryTarget, image_base64: str, *, need_message_id: bool = False) -> DeliveryReceipt:
         bot = self.get_onebot_client(target)
-        if need_message_id and bot is not None and (target.group_id or target.user_id):
-            message_id = await OneBotChannel(bot, self.logger).send_image(
-                target, image_base64
-            )
-            if message_id:
-                return message_id
-            self.logger.debug("OneBot 直发图片失败或未返回 message_id，回退通用通道")
-        await self._generic.send_image(target, image_base64)
-        return ""
+        native = bot is not None and bool(target.group_id or target.user_id)
+        if need_message_id and native:
+            mid, sent = await OneBotChannel(bot, self.logger).send_image_with_status(target, image_base64)
+            if sent:
+                return DeliveryReceipt(True, mid)
+        receipt = await self._generic.send_image_result(target, image_base64)
+        if receipt.success or not native or need_message_id:
+            return receipt
+        mid, sent = await OneBotChannel(bot, self.logger).send_image_with_status(target, image_base64)
+        return DeliveryReceipt(sent, mid)
 
-    async def send_video(
-        self, target: DeliveryTarget, video_url: str, *, need_message_id: bool = False
-    ) -> str:
-        """发送视频并返回 message_id。
+    async def send_video(self, target: DeliveryTarget, video_url: str, *, need_message_id: bool = False) -> str:
+        return (await self.send_video_result(target, video_url, need_message_id=need_message_id)).message_id
 
-        ``need_message_id=True``（需要撤回）时才走 OneBot 直发；否则优先
-        AstrBot 通用通道。直发失败自动回退通用通道。
-        """
+    async def send_video_result(self, target: DeliveryTarget, video_url: str, *, need_message_id: bool = False) -> DeliveryReceipt:
         bot = self.get_onebot_client(target)
         if bot is not None and (target.group_id or target.user_id):
             onebot = OneBotChannel(bot, self.logger)
-            message_id, video_sent = await onebot.send_video_with_status(target, video_url)
-            if video_sent:
-                return message_id if need_message_id else ""
-            # NapCat 4.18.14 等版本对远程 video 段可能报 rich media transfer failed；
-            # 同一 URL 作为 file 段由 NapCat 的通用文件上传流程处理，更稳定。
-            self.logger.warning("OneBot 视频发送失败，改用文件发送: %s", video_url)
-            file_message_id, file_sent = await onebot.send_file_with_status(target, video_url)
-            if file_sent:
-                return file_message_id if need_message_id else ""
-            self.logger.debug("OneBot 直发视频和文件均失败，回退通用通道")
-        await self._generic.send_video(target, video_url)
-        return ""
+            mid, sent = await onebot.send_video_with_status(target, video_url)
+            if sent:
+                return DeliveryReceipt(True, mid if need_message_id else "")
+            self.logger.warning("OneBot 视频发送失败，改用文件发送")
+            mid, sent = await onebot.send_file_with_status(target, video_url)
+            if sent:
+                return DeliveryReceipt(True, mid if need_message_id else "")
+        return await self._generic.send_video_result(target, video_url)
 
     async def send_file(
         self,

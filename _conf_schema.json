@@ -103,6 +103,12 @@
         "default": "",
         "hint": "留空使用默认/当前会话模型",
         "_special": "select_provider"
+      },
+      "media_history_minutes": {
+        "description": "聊天图片、任务复用与补发结果保留时间（分钟）",
+        "type": "int",
+        "default": 60,
+        "hint": "1–1440 分钟；按平台、会话和用户隔离，记录过期后无法从插件补发"
       }
     }
   },
@@ -187,6 +193,17 @@
             "description": "扩写模板路径（相对插件目录）",
             "type": "string",
             "default": ""
+          },
+          "description": {
+            "description": "用途说明",
+            "type": "text",
+            "default": "",
+            "hint": "告诉模型适用场景，如人物换背景、风格参考、图生视频；模型据此选择工作流"
+          },
+          "llm_enabled": {
+            "description": "允许自然语言调用",
+            "type": "bool",
+            "default": true
           }
         }
       }
@@ -224,7 +241,7 @@
             "description": "默认值",
             "type": "text",
             "default": "",
-            "hint": "留空=运行时由用户提供；填写=固定默认值"
+            "hint": "主提示词和可编辑配置可覆盖默认值；固定默认值始终使用；文件节点填写后无需上传"
           },
           "value_type": {
             "description": "节点类型",
@@ -245,7 +262,43 @@
             "description": "输入说明",
             "type": "string",
             "default": "",
-            "hint": "等待用户上传时显示的中文说明"
+            "hint": "同时供模型理解输入角色，如人物参考图、风格参考图、输出宽度"
+          },
+          "required": {
+            "description": "必填输入",
+            "type": "bool",
+            "default": false,
+            "hint": "没有默认值时必须补充；必填文件不能跳过"
+          },
+          "param_type": {
+            "description": "可编辑参数的数据类型",
+            "type": "string",
+            "default": "string",
+            "options": [
+              "string",
+              "integer",
+              "number",
+              "boolean"
+            ],
+            "hint": "用于 text 节点的运行前校验"
+          },
+          "minimum": {
+            "description": "数值下限",
+            "type": "string",
+            "default": "",
+            "hint": "留空不限制；仅 integer / number 生效"
+          },
+          "maximum": {
+            "description": "数值上限",
+            "type": "string",
+            "default": "",
+            "hint": "留空不限制；仅 integer / number 生效"
+          },
+          "choices": {
+            "description": "允许的参数值",
+            "type": "list",
+            "default": [],
+            "hint": "留空不限制，如 1:1、16:9、9:16；仅 text 节点生效"
           }
         }
       }

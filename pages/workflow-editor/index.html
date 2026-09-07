@@ -425,6 +425,8 @@ dialog::backdrop{background:var(--overlay)}
     <div class="dialog-body">
       <div class="form-grid">
         <div class="field full"><label for="wfName">工作流名称 *</label><input id="wfName" maxlength="64" placeholder="例如：动漫生图"></div>
+        <div class="field full"><label for="wfDescription">用途说明</label><textarea id="wfDescription" maxlength="1000" rows="3" placeholder="例如：根据人物参考图换背景，保留人物外观。模型将根据此说明选择工作流。"></textarea></div>
+        <div class="field full"><label class="check-row"><input type="checkbox" id="wfLlmEnabled" checked> 允许自然语言调用（支持聊天图片与参数）</label></div>
         <div class="field full"><label for="wfId">工作流 ID *</label><input id="wfId" maxlength="64" placeholder="例如：2087492768787685378"></div>
         <div class="field"><label for="wfInstance">设备类型</label>
           <select id="wfInstance"><option value="Standard">Standard</option><option value="Plus">Plus</option><option value="Ultra">Ultra</option></select>
@@ -473,6 +475,12 @@ dialog::backdrop{background:var(--overlay)}
         </div>
         <div class="field"><label for="nodeLabel">输入说明</label><input id="nodeLabel" maxlength="64" placeholder="例如：角色参考图"></div>
         <div class="field full"><label for="nodeValue">默认值 / 输入内容</label><input id="nodeValue" placeholder="留空则运行时由用户提供或等待上传"></div>
+        <div class="field full"><label class="check-row"><input type="checkbox" id="nodeRequired"> 必填输入（没有默认值时需补充，必填文件不能跳过）</label></div>
+        <div class="field full"><div class="hint">输入说明也用于自然语言识别图片角色，例如“人物参考图”“风格参考图”。以下约束仅用于可编辑配置。</div></div>
+        <div class="field"><label for="nodeParamType">参数数据类型</label><select id="nodeParamType"><option value="string">文本</option><option value="integer">整数</option><option value="number">数值</option><option value="boolean">开关（true / false）</option></select></div>
+        <div class="field"><label for="nodeMin">数值下限</label><input type="number" step="any" id="nodeMin" placeholder="不限制"></div>
+        <div class="field"><label for="nodeMax">数值上限</label><input type="number" step="any" id="nodeMax" placeholder="不限制"></div>
+        <div class="field full"><label for="nodeChoices">允许的参数值（每行一个，留空不限制）</label><textarea id="nodeChoices" rows="3" placeholder="1:1&#10;16:9&#10;9:16"></textarea></div>
         <div class="field full"><div class="hint" id="nodeTypeHint"></div></div>
       </div>
     </div>
@@ -754,7 +762,15 @@ function toast(message, type = "info", duration = 3200) {
   const el = document.createElement("div");
   el.className = `toast ${type === "ok" ? "ok" : type === "err" ? "err" : type === "warn" ? "warn" : ""}`;
   el.textContent = message;
-  $("toasts").appendChild(el);
+  el.setAttribute("role", type === "err" ? "alert" : "status");
+  const activeDialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+  if (activeDialog) {
+    el.style.margin = "8px 20px";
+    el.style.flexShrink = "0";
+    activeDialog.querySelector(".dialog-foot").before(el);
+  } else {
+    $("toasts").appendChild(el);
+  }
   setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 220); }, duration);
 }
 function setDirty(dirty) {
@@ -794,13 +810,69 @@ function normalizeNode(raw) {
     field_name: String(raw?.field_name || "prompt").trim() || "prompt",
     field_value: String(raw?.field_value || ""),
     value_type: valueType === "auto" ? "" : valueType,
-    label: String(raw?.label || "").trim()
+    label: String(raw?.label || "").trim(),
+    required: Boolean(raw?.required),
+    param_type: raw?.param_type || "string",
+    minimum: raw?.minimum === "" || raw?.minimum == null ? null : Number(raw.minimum),
+    maximum: raw?.maximum === "" || raw?.maximum == null ? null : Number(raw.maximum),
+    choices: Array.isArray(raw?.choices) ? raw.choices.map(String) : []
   };
 }
 function validateNode(raw) {
   const node = normalizeNode(raw);
-  if (!node.node_id) return { ok: false, message: "节点 ID 不能为空", node };
+  const fail = (message, field = "nodeValue") => ({ ok: false, message, node, field });
+  if (!node.node_id) return fail("节点 ID 不能为空", "nodeId");
+  const kind = effectiveType(node);
+  const bounds = node.minimum != null || node.maximum != null;
+  if (kind === "default" && node.required && !node.field_value.trim()) return fail("固定默认值标为必填时必须填写默认值；需要用户提供时请修改节点类型");
+  if (kind !== "text") {
+    if (bounds || node.choices.length || node.param_type !== "string") return fail("参数类型、范围和允许值仅用于可编辑配置，请清除这些约束或修改节点类型", "nodeType");
+    return { ok: true, node };
+  }
+  if (bounds && !["integer", "number"].includes(node.param_type)) return fail("只有整数或数值参数可以设置数值范围", "nodeParamType");
+  if ((node.minimum != null && !Number.isFinite(node.minimum)) || (node.maximum != null && !Number.isFinite(node.maximum))) return fail("参数范围必须是有效数字", "nodeMin");
+  if (node.minimum != null && node.maximum != null && node.minimum > node.maximum) return fail("数值下限不能大于上限", "nodeMin");
+  function valueError(value) {
+    if (["integer", "number"].includes(node.param_type)) {
+      if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value)) return "需要有效数字";
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "需要有限数字";
+      if (node.param_type === "integer" && !Number.isInteger(number)) return "需要整数";
+      if (node.minimum != null && number < node.minimum) return `不能小于 ${node.minimum}`;
+      if (node.maximum != null && number > node.maximum) return `不能大于 ${node.maximum}`;
+    }
+    if (node.param_type === "boolean" && !["true", "false", "1", "0"].includes(value.toLowerCase())) return "只能填写 true、false、1 或 0";
+    return "";
+  }
+  for (const choice of node.choices) {
+    const error = valueError(choice);
+    if (error) return fail(`允许值「${choice}」${error}`, "nodeChoices");
+  }
+  const value = node.field_value.trim();
+  if (value) {
+    const error = valueError(value);
+    if (error) return fail(`默认值${error}`);
+    // Numeric normalization and large integers are checked exactly by Python.
+    if (node.param_type === "string" && node.choices.length && !node.choices.includes(value)) return fail(`默认值需选自：${node.choices.join("、")}`);
+  }
   return { ok: true, node };
+}
+
+function validateAllWorkflows() {
+  for (let w = 0; w < state.workflows.length; w++) {
+    const wf = state.workflows[w], seen = new Set();
+    let prompts = 0;
+    for (let n = 0; n < wf.nodes.length; n++) {
+      const check = validateNode(wf.nodes[n]);
+      const key = `${check.node.node_id}/${check.node.field_name}`;
+      let message = check.ok ? "" : check.message;
+      if (seen.has(key)) message = "节点 ID 和字段名重复";
+      seen.add(key);
+      if (effectiveType(check.node) === "prompt" && ++prompts > 1) message = "最多只能有一个主提示词节点";
+      if (message) return { wf: w, node: n, field: check.field, message: `工作流「${wf.name}」第 ${n + 1} 项（${key}）：${message}` };
+    }
+  }
+  return null;
 }
 
 function filterWorkflows() {
@@ -1017,6 +1089,8 @@ function openWorkflowDialog(index) {
   const wf = index >= 0 ? state.workflows[index] : null;
   $("workflowDialogTitle").textContent = wf ? "编辑工作流" : "新建工作流";
   $("wfName").value = wf?.name || "";
+  $("wfDescription").value = wf?.description || "";
+  $("wfLlmEnabled").checked = wf?.llm_enabled !== false;
   $("wfId").value = wf?.workflow_id || "";
   $("wfInstance").value = wf?.instance_type || "Standard";
   $("wfRegion").value = wf?.region || "overseas";
@@ -1034,6 +1108,8 @@ function saveWorkflowFromDialog() {
   if (duplicate >= 0) return toast(`工作流名称「${name}」已存在`, "err");
   const data = {
     name,
+    description: $("wfDescription").value.trim(),
+    llm_enabled: $("wfLlmEnabled").checked,
     workflow_id: workflowId,
     instance_type: $("wfInstance").value,
     region: $("wfRegion").value,
@@ -1068,6 +1144,11 @@ function openNodeDialog(wfIndex, nodeIndex) {
   $("nodeValue").value = node?.field_value || "";
   $("nodeType").value = node?.value_type || "";
   $("nodeLabel").value = node?.label || "";
+  $("nodeRequired").checked = Boolean(node?.required);
+  $("nodeParamType").value = node?.param_type || "string";
+  $("nodeMin").value = node?.minimum ?? "";
+  $("nodeMax").value = node?.maximum ?? "";
+  $("nodeChoices").value = (node?.choices || []).join("\n");
   updateNodeTypeHint();
   $("nodeDialog").showModal();
 }
@@ -1078,9 +1159,14 @@ function saveNodeFromDialog() {
     field_name: $("nodeField").value,
     field_value: $("nodeValue").value,
     value_type: $("nodeType").value,
-    label: $("nodeLabel").value
+    label: $("nodeLabel").value,
+    required: $("nodeRequired").checked,
+    param_type: $("nodeParamType").value,
+    minimum: $("nodeMin").value,
+    maximum: $("nodeMax").value,
+    choices: $("nodeChoices").value.split("\n").map(s => s.trim()).filter(Boolean)
   });
-  if (!check.ok) return toast(check.message, "err");
+  if (!check.ok) { $(check.field || "nodeValue").focus(); return toast(check.message, "err"); }
   const targetName = $("nodeWorkflow").value;
   let wfIndex = state.workflows.findIndex((wf) => wf.name === targetName);
   if (wfIndex < 0) wfIndex = nodeDialogState.wf;
@@ -1130,6 +1216,13 @@ async function loadConfig() {
 
 async function saveConfig() {
   if (state.saving) return;
+  const invalid = validateAllWorkflows();
+  if (invalid) {
+    openNodeDialog(invalid.wf, invalid.node);
+    if (invalid.field) $(invalid.field).focus();
+    toast(invalid.message, "err", 7000);
+    return;
+  }
   state.saving = true;
   $("saveBtn").disabled = true;
   $("saveBtn").textContent = "保存中…";

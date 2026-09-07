@@ -78,6 +78,8 @@ class FeatureSection(BaseModel):
 
     __ui_label__ = "功能设置"
 
+    media_history_minutes: int = Field(default=60, ge=1, le=1440, description="聊天图片、任务复用与补发结果保留分钟数")
+
     enable: bool = Field(
         default=False,
         description="启用发送后自动撤回（仅在使用 NapCat 适配器时生效，其他平台无效）",
@@ -164,8 +166,8 @@ class InputNodeSection(BaseModel):
     )
     field_value: str = Field(
         default="",
-        description="输入内容。填写后作为固定默认值直接使用（不接受修改）；留空则按类型由用户提供",
-        json_schema_extra={"label": "输入内容（默认值）", "hint": "留空=等待用户输入；填写=固定默认值"},
+        description="节点默认值。主提示词和可编辑配置允许覆盖；固定默认值始终使用；文件节点填写后无需上传",
+        json_schema_extra={"label": "输入内容（默认值）", "hint": "是否可修改取决于节点类型；必填空项会提示补充"},
     )
     value_type: Literal["", "default", "text", "image", "audio", "video", "prompt"] = Field(
         default="",
@@ -188,6 +190,17 @@ class InputNodeSection(BaseModel):
         description="该输入的中文说明（等待上传时提示用户），留空使用节点 ID",
         json_schema_extra={"label": "输入说明", "placeholder": "角色参考图"},
     )
+    required: bool = Field(default=False, description="必填输入；没有默认值时必须补充，必填文件不能跳过")
+    param_type: Literal["string", "integer", "number", "boolean"] = "string"
+    minimum: float | None = Field(default=None, allow_inf_nan=False)
+    maximum: float | None = Field(default=None, allow_inf_nan=False)
+    choices: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_bounds(self):
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError("参数最小值不能大于最大值")
+        return self
 
     @field_validator("value_type", mode="before")
     @classmethod
@@ -202,6 +215,9 @@ class WorkflowItemSection(BaseModel):
     """单个工作流配置（可自由增加数量）。"""
 
     __ui_label__ = "工作流"
+
+    description: str = Field(default="", max_length=1000, description="用途与适用场景，供自然语言选择工作流")
+    llm_enabled: bool = Field(default=True, description="允许自然语言调用")
 
     name: str = Field(
         default="",
@@ -239,7 +255,7 @@ class WorkflowItemSection(BaseModel):
     )
     input_nodes: list[InputNodeSection] = Field(
         default_factory=list,
-        description="输入节点列表，按此顺序接收用户输入（最多 8 个）",
+        description="输入节点列表，按此顺序接收用户输入（最多 32 个）",
         json_schema_extra={"label": "输入节点"},
     )
 
@@ -301,7 +317,7 @@ class GenericConfig(BaseModel):
         return value
 
 
-def _node_from_raw(raw: dict[str, Any]) -> dict[str, str] | None:
+def _node_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     node_id = str(raw.get("node_id") or "").strip()
@@ -313,6 +329,11 @@ def _node_from_raw(raw: dict[str, Any]) -> dict[str, str] | None:
         "field_value": str(raw.get("field_value") or ""),
         "value_type": str(raw.get("value_type") or "").strip().lower(),
         "label": str(raw.get("label") or "").strip(),
+        "required": bool(raw.get("required", False)),
+        "param_type": str(raw.get("param_type") or "string"),
+        "minimum": raw.get("minimum") if raw.get("minimum") != "" else None,
+        "maximum": raw.get("maximum") if raw.get("maximum") != "" else None,
+        "choices": raw.get("choices") or [],
     }
 
 
@@ -362,6 +383,8 @@ def _workflow_dict_from_raw(entry: dict[str, Any]) -> dict[str, Any] | None:
         "region": region,
         "llm_enhance": bool(entry.get("llm_enhance", False)),
         "llm_template_path": str(entry.get("llm_template_path") or "").strip(),
+        "description": str(entry.get("description") or "").strip(),
+        "llm_enabled": bool(entry.get("llm_enabled", True)),
         "input_nodes": [],
     }
 
@@ -437,6 +460,8 @@ def dump_workflow_items(items: list[WorkflowItemSection]) -> list[dict[str, Any]
             "region": str(wf.region or "overseas"),
             "llm_enhance": bool(wf.llm_enhance),
             "llm_template_path": str(wf.llm_template_path or ""),
+            "description": wf.description,
+            "llm_enabled": wf.llm_enabled,
         }
         for wf in items
     ]
@@ -456,6 +481,11 @@ def dump_workflow_nodes(items: list[WorkflowItemSection]) -> list[dict[str, Any]
                     "field_value": str(node.field_value or ""),
                     "value_type": str(node.value_type or ""),
                     "label": str(node.label or ""),
+                    "required": node.required,
+                    "param_type": node.param_type,
+                    "minimum": node.minimum,
+                    "maximum": node.maximum,
+                    "choices": node.choices,
                 }
             )
     return result
@@ -495,6 +525,7 @@ def build_config_model(data: dict[str, Any]) -> GenericConfig:
             "download_timeout": int(_s(generation, "download_timeout", 120)),
         },
         "feature": {
+            "media_history_minutes": int(_s(feature, "media_history_minutes", 60)),
             "enable": bool(_s(feature, "enable", False)),
             "recall_seconds": int(_s(feature, "recall_seconds", 90)),
             "result_notice": bool(_s(feature, "result_notice", True)),
@@ -534,6 +565,7 @@ def dump_config_dict(config: GenericConfig) -> dict[str, Any]:
             "download_timeout": int(config.generation.download_timeout),
         },
         "feature": {
+            "media_history_minutes": config.feature.media_history_minutes,
             "enable": bool(config.feature.enable),
             "recall_seconds": int(config.feature.recall_seconds),
             "result_notice": bool(config.feature.result_notice),

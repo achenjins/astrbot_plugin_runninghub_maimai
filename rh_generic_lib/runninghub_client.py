@@ -171,7 +171,7 @@ class RunningHubClient:
         content = await self.download_bytes(url)
         return base64.b64encode(content).decode("ascii")
 
-    async def download_bytes(self, url: str) -> bytes:
+    async def download_bytes(self, url: str, *, max_bytes: int = _MAX_DOWNLOAD_BYTES) -> bytes:
         """下载文件并返回原始字节（供二次上传使用），带最大字节数限制。"""
 
         def _do() -> bytes:
@@ -190,9 +190,9 @@ class RunningHubClient:
                     if not chunk:
                         continue
                     total += len(chunk)
-                    if total > _MAX_DOWNLOAD_BYTES:
+                    if total > max_bytes:
                         raise RunningHubError(
-                            f"下载内容超过 {_MAX_DOWNLOAD_BYTES} 字节上限，已拒绝"
+                            f"下载内容超过 {max_bytes} 字节上限，已拒绝"
                         )
                     chunks.append(chunk)
                 return b"".join(chunks)
