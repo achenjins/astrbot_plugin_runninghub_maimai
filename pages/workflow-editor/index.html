@@ -141,7 +141,7 @@ textarea{resize:vertical;min-height:68px}
   .task-panel-head h2{margin:0 auto 0 0;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
   .task-panel-head .count{color:var(--muted);font-size:12px;font-weight:400}
   .task-table-head,.task-row{
-    display:grid;grid-template-columns:minmax(160px,1.35fr) minmax(120px,1fr) 132px;gap:16px;
+    display:grid;grid-template-columns:minmax(150px,1.5fr) minmax(100px,1fr) minmax(155px,1.2fr) 90px minmax(105px,.8fr);gap:12px;
     align-items:center;padding:13px 18px;
   }
   .task-table-head{
@@ -172,6 +172,14 @@ textarea{resize:vertical;min-height:68px}
   .task-empty h3{margin:0 0 6px;font-size:15px;color:var(--text)}
   .task-empty p{margin:0;font-size:13px}
   .task-error{color:var(--error);font-size:12px;margin:0}
+  .task-detail{grid-column:1/-1;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+  .task-detail summary{cursor:pointer}
+  .task-progress{font-size:12px;line-height:1.7;overflow-wrap:anywhere}
+  .task-progress small{display:block;color:var(--muted)}
+  .task-operations{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+  .task-filter{max-width:170px;font-size:12px;padding:6px 8px}
+  .task-summary-note{padding:10px 18px;margin:0;font-size:12px;color:var(--muted)}
+  @media(max-width:900px) and (min-width:641px){.task-table-head,.task-row{grid-template-columns:minmax(125px,1fr) 95px 145px 65px 82px;gap:8px;padding:12px}}
 .stat-icon{width:44px;height:44px;border-radius:11px;display:grid;place-items:center;flex:0 0 auto}
 .stat-icon.blue{background:var(--primary-light);color:var(--primary)}
 .stat-icon.teal{background:rgba(3,201,215,.10);color:var(--info)}
@@ -307,8 +315,9 @@ dialog::backdrop{background:var(--overlay)}
     .balance-grid{grid-template-columns:1fr}
     .task-summary-grid{grid-template-columns:1fr}
     .task-table-head{display:none}
-    .task-row{grid-template-columns:1fr auto;grid-template-areas:"workflow coins" "id id";row-gap:8px}
+    .task-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"workflow coins" "id id" "progress operations" "detail detail";row-gap:8px}
     .task-workflow{grid-area:workflow}.task-coins{grid-area:coins}.task-id{grid-area:id}
+    .task-progress{grid-area:progress}.task-operations{grid-area:operations}.task-detail{grid-area:detail}
   .grid{columns:1;column-gap:0}
   .app{padding:12px 12px 64px}
   .brand .sub{display:none}
@@ -401,19 +410,23 @@ dialog::backdrop{background:var(--overlay)}
         <div class="task-panel-head">
           <h2><span class="icon icon-history" style="width:16px;height:16px" aria-hidden="true"></span>最近任务记录<span class="count" id="taskCountLabel"></span></h2>
           <button class="btn text small" id="taskRefreshBtn"><span class="icon icon-refresh" style="width:14px;height:14px" aria-hidden="true"></span>刷新</button>
-          <button class="btn danger-text small" id="taskClearBtn" disabled><span class="icon icon-delete" style="width:14px;height:14px" aria-hidden="true"></span>清空记录</button>
+          <select id="taskFilter" class="task-filter" aria-label="筛选任务状态"><option value="all">全部任务</option><option value="active">运行和排队</option><option value="attention">需要处理</option><option value="ended">已结束</option></select>
+          <button class="btn danger-text small" id="taskClearBtn" disabled><span class="icon icon-delete" style="width:14px;height:14px" aria-hidden="true"></span>清理已结束</button>
         </div>
         <div class="task-table-head">
           <div>任务 ID</div>
           <div>工作流</div>
+          <div>状态 / 耗时</div>
           <div style="text-align:right">RH 币消耗</div>
+          <div style="text-align:right">操作</div>
         </div>
         <div id="taskList"></div>
         <div class="task-empty hidden" id="taskEmptyState">
           <div class="big"><span class="icon icon-history" style="width:28px;height:28px" aria-hidden="true"></span></div>
           <h3>还没有任务记录</h3>
-          <p>通过插件运行工作流后，成功的任务会记录到这里（任务 ID / 工作流 / RH 币消耗）。</p>
+          <p>当前筛选下没有任务。运行工作流后可在这里查看进度和结果。</p>
         </div>
+        <p class="task-summary-note" id="taskActivity">任务页面每 5 秒刷新。补发发送到原会话；恢复查询沿用已有任务。</p>
       </div>
     </section>
 
@@ -431,6 +444,7 @@ dialog::backdrop{background:var(--overlay)}
         <div class="field"><label for="wfInstance">设备类型</label>
           <select id="wfInstance"><option value="Standard">Standard</option><option value="Plus">Plus</option><option value="Ultra">Ultra</option></select>
         </div>
+        <div class="field"><label for="wfOutputType">输出类型</label><select id="wfOutputType"><option value="auto">自动</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option><option value="file">文件</option></select></div>
         <div class="field"><label for="wfRegion">区域</label>
           <select id="wfRegion"><option value="overseas">国外 runninghub.ai</option><option value="domestic">国内 runninghub.cn</option></select>
         </div>
@@ -533,13 +547,20 @@ dialog::backdrop{background:var(--overlay)}
 
 <dialog id="clearTasksDialog">
   <div class="dialog">
-    <div class="dialog-head"><h3>清空任务记录？</h3></div>
-    <div class="dialog-body"><p id="clearTasksText" style="color:var(--muted);margin:0">这会删除插件保存的最近任务记录，RunningHub 平台上的账单不会受影响。</p></div>
+    <div class="dialog-head"><h3>清理已结束的任务？</h3></div>
+    <div class="dialog-body"><p id="clearTasksText" style="color:var(--muted);margin:0">只隐藏已结束的记录，正在进行的任务保留。原任务仍可按编号补发，RunningHub 账单不受影响。</p></div>
     <div class="dialog-foot">
       <button class="btn text" id="clearTasksCancelBtn">取消</button>
-      <button class="btn danger-text" id="clearTasksOkBtn">清空</button>
+      <button class="btn danger-text" id="clearTasksOkBtn">清理</button>
     </div>
   </div>
+</dialog>
+<dialog id="taskSelectionDialog">
+  <form method="dialog" class="dialog">
+    <div class="dialog-head"><h3>选择补发结果</h3></div>
+    <div class="dialog-body field"><label for="taskSelection">结果序号</label><input id="taskSelection" placeholder="如 2 或 1,3；all 表示全部" autocomplete="off"><p class="hint">留空优先补发未送达项。结果发送到任务原会话。</p></div>
+    <div class="dialog-foot"><button class="btn text" value="cancel">取消</button><button class="btn filled" value="send">补发</button></div>
+  </form>
 </dialog>
 
 
@@ -667,24 +688,40 @@ function taskRowMarkup(record) {
   const taskId = esc(record.task_id || "");
   const workflow = record.workflow || "";
   const coins = esc(formatTaskCoins(record.coins));
+  const elapsed = record.elapsed_seconds == null ? "耗时未知" : record.elapsed_seconds < 60 ? `${record.elapsed_seconds} 秒` : `${Math.floor(record.elapsed_seconds / 60)} 分 ${record.elapsed_seconds % 60} 秒`;
+  const queue = record.queue_position ? ` · 等待序位 ${record.queue_position}` : "";
+  const labels = {cancel:"取消", resume:"恢复查询", resend:"补发"};
+  const operations = (record.actions || []).map(action => `<button class="btn text small" data-task="${taskId}" data-action="${esc(action)}" ${record.busy ? "disabled" : ""}>${labels[action] || ""}</button>`).join("");
+  const detail = [record.message, ...(record.errors || []), record.remote_task_id ? `平台编号：${record.remote_task_id}` : "", record.action_message || ""].filter(Boolean).map(esc).join("<br>");
   return `<div class="task-row">
     <div class="task-id" title="点击复制任务 ID" data-copy="${taskId}">${taskId}<span class="copy-hint">复制</span></div>
     <div class="task-workflow"><span class="chip">${workflow ? esc(workflow) : "未记录工作流"}</span></div>
+    <div class="task-progress"><b>${esc(record.status_label || "历史记录")}</b>${esc(queue)}<small>${esc(record.stage_label || "")} · ${record.queue_position ? "已等待 " : ""}${elapsed}</small>${record.output_count ? `<small>已送达 ${record.sent_count}/${record.output_count} 项</small>` : ""}</div>
     <div class="task-coins"><span class="coin-icon"><span class="icon icon-wallet" style="width:14px;height:14px" aria-hidden="true"></span></span><b>${coins}</b><span>RH 币</span></div>
+    <div class="task-operations">${record.busy ? "处理中…" : operations}</div>
+    ${detail ? `<details class="task-detail" data-details="${taskId}"><summary>查看详情</summary>${detail}</details>` : ""}
   </div>`;
 }
 function renderTaskHistory() {
-  const records = taskHistoryState.records;
-  const total = records.reduce((sum, item) => sum + taskCoinValue(item.coins), 0);
-  $("taskStatCount").textContent = String(records.length);
+  const all = taskHistoryState.records;
+  const filter = $("taskFilter").value;
+  const active = ["queued", "submitting", "pending"];
+  const attention = ["tracking_paused", "needs_attention", "unknown_submission"];
+  const records = all.filter(r => filter === "all" || (filter === "active" && active.includes(r.status)) || (filter === "attention" && (attention.includes(r.status) || ["partial", "uncertain"].includes(r.delivery_status))) || (filter === "ended" && ["success", "failed", "cancelled"].includes(r.status)));
+  const total = all.reduce((sum, item) => sum + taskCoinValue(item.coins), 0);
+  $("taskStatCount").textContent = String(all.length);
   $("taskStatTotal").textContent = formatTaskCoins(total);
   $("taskStatUpdated").textContent = taskHistoryState.updatedAt || "—";
   $("taskCountLabel").textContent = records.length ? `共 ${records.length} 条` : "";
+  const expanded = new Set([...$("taskList").querySelectorAll("details[open]")].map(el => el.dataset.details));
   $("taskList").innerHTML = records.map(taskRowMarkup).join("");
+  $("taskList").querySelectorAll("details").forEach(el => { el.open = expanded.has(el.dataset.details); });
   $("taskEmptyState").classList.toggle("hidden", records.length > 0);
-  $("taskClearBtn").disabled = taskHistoryState.loading || records.length === 0;
+  $("taskClearBtn").disabled = taskHistoryState.loading || !all.some(r => ["success", "failed", "cancelled"].includes(r.status));
+  $("taskActivity").textContent = taskHistoryState.error || `运行和排队 ${all.filter(r => active.includes(r.status)).length} · 需处理 ${all.filter(r => attention.includes(r.status) || ["partial", "uncertain"].includes(r.delivery_status)).length} · 每 5 秒刷新。补发发送到原会话。`;
 }
-async function loadTaskHistory() {
+async function loadTaskHistory(quiet = false) {
+  if (taskHistoryState.loading) return;
   taskHistoryState.loading = true;
   $("taskRefreshBtn").disabled = true;
   renderTaskHistory();
@@ -693,10 +730,12 @@ async function loadTaskHistory() {
     if (!res || res.success === false) throw new Error(res?.message || "读取任务记录失败");
     taskHistoryState.records = Array.isArray(res.records) ? res.records.filter((item) => item && item.task_id) : [];
     taskHistoryState.loaded = true;
+    taskHistoryState.error = "";
     taskHistoryState.updatedAt = taskNowTime();
-    toast(`已读取 ${taskHistoryState.records.length} 条任务记录`, "ok", 1800);
+    if (!quiet) toast(`已读取 ${taskHistoryState.records.length} 条任务记录`, "ok", 1800);
   } catch (err) {
-    toast(String(err?.message || err), "err", 6000);
+    if (!quiet) toast(String(err?.message || err), "err", 6000);
+    taskHistoryState.error = `刷新失败：${String(err?.message || err)}`;
   } finally {
     taskHistoryState.loading = false;
     $("taskRefreshBtn").disabled = false;
@@ -709,14 +748,43 @@ async function clearTaskHistory() {
   try {
     const res = normalizeApiResponse(await bridge.apiPost("page/tasks/clear", {}));
     if (!res || res.success === false) throw new Error(res?.message || "清空失败");
-    taskHistoryState.records = [];
-    taskHistoryState.updatedAt = taskNowTime();
-    renderTaskHistory();
+    await loadTaskHistory(true);
     toast(res.message || "任务记录已清空", "ok");
   } catch (err) {
     toast(String(err?.message || err), "err", 6000);
   } finally {
     $("clearTasksOkBtn").disabled = false;
+  }
+}
+async function performTaskAction(button) {
+  const {task: task_id, action} = button.dataset;
+  const record = taskHistoryState.records.find(r => r.task_id === task_id);
+  if (!record || record.busy) return;
+  let selection = "";
+  if (action === "resend" && record.output_count > 1) {
+    selection = await new Promise(resolve => {
+      const dialog = $("taskSelectionDialog");
+      $("taskSelection").value = "";
+      dialog.returnValue = "cancel";
+      dialog.addEventListener("close", () => resolve(dialog.returnValue === "send" ? $("taskSelection").value.trim() : null), {once:true});
+      dialog.showModal();
+      $("taskSelection").focus();
+    });
+    if (selection === null) return;
+  }
+  record.busy = true;
+  renderTaskHistory();
+  try {
+    const request_id = crypto.randomUUID ? crypto.randomUUID() : `page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const res = normalizeApiResponse(await bridge.apiPost("page/tasks/action", {task_id, action, selection, request_id}));
+    if (!res || res.success === false) throw new Error(res?.message || "操作未成功");
+    toast(res.message, "ok");
+    await loadTaskHistory(true);
+  } catch (err) {
+    toast(String(err?.message || err), "err", 6000);
+  } finally {
+    record.busy = false;
+    renderTaskHistory();
   }
 }
 async function copyTaskId(text) {
@@ -1090,6 +1158,7 @@ function openWorkflowDialog(index) {
   $("workflowDialogTitle").textContent = wf ? "编辑工作流" : "新建工作流";
   $("wfName").value = wf?.name || "";
   $("wfDescription").value = wf?.description || "";
+  $("wfOutputType").value = wf?.output_type || "auto";
   $("wfLlmEnabled").checked = wf?.llm_enabled !== false;
   $("wfId").value = wf?.workflow_id || "";
   $("wfInstance").value = wf?.instance_type || "Standard";
@@ -1110,6 +1179,7 @@ function saveWorkflowFromDialog() {
     name,
     description: $("wfDescription").value.trim(),
     llm_enabled: $("wfLlmEnabled").checked,
+    output_type: $("wfOutputType").value,
     workflow_id: workflowId,
     instance_type: $("wfInstance").value,
     region: $("wfRegion").value,
@@ -1458,9 +1528,13 @@ $("pageTabs").addEventListener("click", (event) => {
   const tab = event.target.closest(".page-tab")?.dataset?.tab;
   if (tab) switchTab(tab);
 });
-$("taskRefreshBtn").addEventListener("click", loadTaskHistory);
+$("taskRefreshBtn").addEventListener("click", () => loadTaskHistory());
+$("taskFilter").addEventListener("change", renderTaskHistory);
+setInterval(() => { if (currentTab === "tasks" && !document.hidden) loadTaskHistory(true); }, 5000);
 $("taskClearBtn").addEventListener("click", () => $("clearTasksDialog").showModal());
 $("taskList").addEventListener("click", (event) => {
+  const action = event.target.closest("[data-action]");
+  if (action) { performTaskAction(action); return; }
   const target = event.target.closest("[data-copy]");
   if (target) copyTaskId(target.getAttribute("data-copy"));
 });

@@ -168,6 +168,12 @@ class MediaStore:
         return [copy.deepcopy(v) for v in sorted(self.runs.values(), key=lambda v: v["created_at"], reverse=True)
                 if v.get("owner") == owner]
 
+    def update_run(self, owner: str, task_id: str, **changes: Any) -> None:
+        run = self.runs.get(task_id)
+        if run and run.get("owner") == owner:
+            run.update(copy.deepcopy(changes), updated_at=time.time())
+            self._save()
+
 
     def remember_delivery(self, owner: str, task_id: str, **values: Any) -> dict[str, Any]:
         if not owner:
@@ -194,4 +200,10 @@ class MediaStore:
         record = self.deliveries.get(task_id)
         if record and record.get("owner") == owner:
             record["outputs"][index].update(changes)
+            self._save()
+
+    def update_delivery(self, owner: str, task_id: str, **changes: Any) -> None:
+        record = self.deliveries.get(task_id)
+        if record and record.get("owner") == owner:
+            record.update(copy.deepcopy(changes))
             self._save()

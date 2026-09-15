@@ -64,11 +64,21 @@ def plugin(tmp_path, monkeypatch):
     star._refresh_workflows()
     star._client = Client()
 
-    async def no_poll(*args, **kwargs):
-        pass
+    async def no_poll(task_id, *args, **kwargs):
+        await star._task_journal.update(task_id, status="success", delivery_status="sent")
 
     monkeypatch.setattr(star, "_poll_and_send", no_poll)
     return star
+
+
+async def finish_jobs(plugin):
+    if plugin._pending:
+        await asyncio.wait_for(asyncio.gather(*list(plugin._pending.values())), 5)
+
+
+async def with_jobs(coro, plugin):
+    await coro
+    await finish_jobs(plugin)
 
 
 def values(plugin):
@@ -90,9 +100,9 @@ def test_current_image_and_parameters_submit_once_without_changing_config(plugin
         request = event("把这张图改成水彩，宽度1024", images=1)
         reply = await plugin.handle_run_workflow(request, "改图", "改成水彩", parameters={"宽度": 1024})
         duplicate = await plugin.handle_run_workflow(request, "改图", "再调用一次")
-        assert reply == duplicate
-        assert "task-1" in reply
-    asyncio.run(run())
+        assert json.loads(reply)["task_id"] == json.loads(duplicate)["task_id"]
+        assert json.loads(reply)["task_id"].startswith("rh-")
+    asyncio.run(with_jobs(run(), plugin))
     assert len(plugin._client.submissions) == 1
     assert len(plugin._client.uploads) == 1
     assert values(plugin)["3/width"] == "1024"
@@ -105,8 +115,8 @@ def test_quoted_image_uses_reply_chain(plugin):
     async def run():
         request = event("给这张图换背景", messages=[Reply(id="88", chain=[Image.fromURL("https://example.test/quoted.png")])])
         reply = await plugin.handle_run_workflow(request, "改图", "更换背景")
-        assert "已提交" in reply
-    asyncio.run(run())
+        assert "queued" in reply
+    asyncio.run(with_jobs(run(), plugin))
     assert plugin._client.downloads == ["https://example.test/quoted.png"]
 
 
@@ -119,8 +129,8 @@ def test_quote_fallback_calls_napcat_get_msg(plugin):
     plugin.context.platform_inst = SimpleNamespace(get_client=lambda: Bot())
     async def run():
         request = event(messages=[Reply(id="88", chain=[])])
-        assert "已提交" in await plugin.handle_run_workflow(request, "改图", "水彩")
-    asyncio.run(run())
+        assert "queued" in await plugin.handle_run_workflow(request, "改图", "水彩")
+    asyncio.run(with_jobs(run(), plugin))
     assert actions == [("get_msg", {"message_id": 88})]
     assert plugin._client.downloads == ["https://example.test/fallback.png"]
 
@@ -136,8 +146,8 @@ def test_previous_message_images_are_selectable_and_not_consumed(plugin):
         ref = context["images"][0]["ref"]
         assert context["images"][0]["source"] == "recent"
         assert "https://" not in json.dumps(context)
-        assert "已提交" in await plugin.handle_run_workflow(request, "改图", "水彩", image_refs=[ref])
-    asyncio.run(run())
+        assert "queued" in await plugin.handle_run_workflow(request, "改图", "水彩", image_refs=[ref])
+    asyncio.run(with_jobs(run(), plugin))
 
 
 @pytest.mark.parametrize("other", [{"user": "other"}, {"group": "other"}])
@@ -146,7 +156,7 @@ def test_foreign_image_reference_rejected_before_upload(plugin, other):
         ctx = json.loads(await plugin.handle_workflow_context(event(images=1)))
         reply = await plugin.handle_run_workflow(event(**other), "改图", "水彩", image_refs=[ctx["images"][0]["ref"]])
         assert "不属于" in reply
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
     assert not plugin._client.uploads
     assert not plugin._client.submissions
 
@@ -155,7 +165,7 @@ def test_current_and_quoted_images_require_explicit_selection(plugin):
     async def run():
         request = event(messages=[Image.fromURL("https://example.test/a.png"), Reply(id="88", chain=[Image.fromURL("https://example.test/b.png")])])
         assert "明确选择" in await plugin.handle_run_workflow(request, "改图", "水彩")
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
     assert not plugin._client.uploads
 
 
@@ -167,8 +177,8 @@ def test_multimage_roles_and_same_image_in_two_slots(plugin):
         ref = context["images"][0]["ref"]
         assert "明确绑定角色" in await plugin.handle_run_workflow(request, "改图", "水彩", image_refs=[ref])
         reply = await plugin.handle_run_workflow(request, "改图", "水彩", image_bindings={"人物参考": ref, "风格参考": ref})
-        assert "已提交" in reply
-    asyncio.run(run())
+        assert "queued" in reply
+    asyncio.run(with_jobs(run(), plugin))
     assert len(plugin._client.uploads) == 1
     assert values(plugin)["2/image"] == values(plugin)["5/image"]
 
@@ -177,7 +187,7 @@ def test_multimage_roles_and_same_image_in_two_slots(plugin):
 def test_bad_parameters_cannot_upload_or_submit(plugin, params, reason):
     async def run():
         assert reason in await plugin.handle_run_workflow(event(images=1), "改图", "水彩", parameters=params)
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
     assert not plugin._client.uploads
     assert not plugin._client.submissions
 
@@ -191,9 +201,10 @@ def test_missing_image_returns_waiting_and_cancel_works(plugin):
         assert not plugin._client.submissions
         assert plugin._input_sessions
         await plugin.handle_input_collector(event(images=1, mid="second"))
+        await finish_jobs(plugin)
         assert len(plugin._client.submissions) == 1
         assert not plugin._input_sessions
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
 
 
 def test_cancel_during_prompt_input_and_at_quota(plugin):
@@ -201,22 +212,23 @@ def test_cancel_during_prompt_input_and_at_quota(plugin):
         await plugin.handle_run_workflow(event(images=1), "改图", "")
         assert next(iter(plugin._input_sessions.values())).phase == "text"
         plugin.config.access.max_per_user_per_hour = 1
-        plugin._user_requests["10001"] = [time.time()]
+        await (await plugin._load_task_journal()).update("quota-task", status="success", user_id="10001", submitted_at=time.time(), delivery_status="sent")
         cancel = event("/wf中断")
         await plugin.handle_input_collector(cancel)
         assert not plugin._is_consumed(cancel)
         await plugin.handle_rh_cancel(cancel)
         assert not plugin._input_sessions
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
     assert not plugin._client.submissions
 
 
 def test_followup_inherits_original_input_and_parameters(plugin):
     async def run():
-        await plugin.handle_run_workflow(event(images=1), "改图", "水彩", parameters={"width": 1024})
-        reply = await plugin.handle_run_workflow(event(mid="2"), "", "换成夜景", reuse_task_id="task-1")
-        assert "task-2" in reply
-    asyncio.run(run())
+        first = json.loads(await plugin.handle_run_workflow(event(images=1), "改图", "水彩", parameters={"width": 1024}))
+        await finish_jobs(plugin)
+        reply = await plugin.handle_run_workflow(event(mid="2"), "", "换成夜景", reuse_task_id=first["task_id"])
+        assert json.loads(reply)["task_id"] != first["task_id"]
+    asyncio.run(with_jobs(run(), plugin))
     assert values(plugin)["3/width"] == "1024"
     assert "水彩" in values(plugin)["1/prompt"] and "夜景" in values(plugin)["1/prompt"]
     assert len(plugin._client.uploads) == 2
@@ -226,7 +238,8 @@ def test_followup_inherits_original_input_and_parameters(plugin):
 def test_generated_second_image_can_be_edited_after_reload(plugin):
     async def run():
         original = event(images=1)
-        await plugin.handle_run_workflow(original, "改图", "水彩")
+        first = json.loads(await plugin.handle_run_workflow(original, "改图", "水彩"))
+        await finish_jobs(plugin)
         context = plugin._event_ctx(original)
         plugin._remember_generated_image("task-1", 2, "https://example.test/generated2.png", original.unified_msg_origin, context)
         plugin._remember_generated_image("task-1", 2, "https://example.test/generated2.png", original.unified_msg_origin, context, base64.b64encode(PNG).decode())
@@ -235,8 +248,8 @@ def test_generated_second_image_can_be_edited_after_reload(plugin):
         available = json.loads(await plugin.handle_workflow_context(request))
         generated = [r for r in available["images"] if r["origin"] == "generated"]
         assert len(generated) == 1 and generated[0]["position"] == 2
-        assert "已提交" in await plugin.handle_run_workflow(request, "改图", "改成夜景", image_refs=[generated[0]["ref"]], reuse_task_id="task-1")
-    asyncio.run(run())
+        assert "queued" in await plugin.handle_run_workflow(request, "改图", "改成夜景", image_refs=[generated[0]["ref"]], reuse_task_id=first["task_id"])
+    asyncio.run(with_jobs(run(), plugin))
     assert len(plugin._client.downloads) == 1  # generated result already cached
 
 
@@ -246,7 +259,7 @@ def test_disabled_workflow_not_exposed_or_executed(plugin):
         request = event(images=1)
         assert not json.loads(await plugin.handle_workflow_context(request))["workflows"]
         assert "未开启" in await plugin.handle_run_workflow(request, "改图", "水彩")
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
     assert not plugin._client.uploads
 
 
@@ -309,10 +322,10 @@ def test_concurrent_submissions_reserve_user_quota(plugin):
         second = await plugin.handle_run_workflow(event(images=1, mid="2"), "改图", "油画")
         assert "上限" in second
         release.set()
-        assert "已提交" in await first
-        assert not plugin._user_submitting
-        assert len(plugin._user_requests["10001"]) == 1
-    asyncio.run(run())
+        assert "queued" in await first
+        await finish_jobs(plugin)
+        assert plugin._task_journal.quota_used("10001", time.time()) == 1
+    asyncio.run(with_jobs(run(), plugin))
     assert len(plugin._client.submissions) == 1
 
 
@@ -329,12 +342,13 @@ def test_unconfirmed_submission_is_not_retried_in_same_turn(plugin):
     async def run():
         request = event(images=1)
         first = await plugin.handle_run_workflow(request, "改图", "水彩")
+        await finish_jobs(plugin)
         second = await plugin.handle_run_workflow(request, "改图", "水彩")
-        assert first == second and "不会自动重试" in first
-        assert not plugin._user_submitting
-        assert not plugin._user_requests.get("10001")
-        assert plugin._semaphore._value == plugin.config.generation.max_concurrent
-    asyncio.run(run())
+        assert json.loads(first)["task_id"] == json.loads(second)["task_id"]
+        assert json.loads(second)["status"] == "unknown_submission"
+        assert plugin._task_journal.quota_used("10001", time.time()) == 1
+        assert plugin._limiter.active == 0
+    asyncio.run(with_jobs(run(), plugin))
     assert len(attempts) == 1
 
 
@@ -364,7 +378,7 @@ def test_skip_and_cancel_during_image_upload_cannot_submit(plugin, monkeypatch):
         release.set()
         await upload
         assert not plugin._client.submissions
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
 
 
 def test_required_parameter_must_be_supplied_after_image_collection(plugin):
@@ -377,18 +391,20 @@ def test_required_parameter_must_be_supplied_after_image_collection(plugin):
         await plugin.handle_input_collector(event("不变", mid="2"))
         assert not plugin._client.submissions
         await plugin.handle_input_collector(event("1e3", mid="3"))
+        await finish_jobs(plugin)
         assert values(plugin)["3/width"] == "1000"
         assert not plugin._input_sessions
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
 
 
 def test_optional_empty_parameter_keeps_cloud_default(plugin):
     plugin._workflows[0].input_nodes[2].field_value = ""
 
     async def run():
-        assert "已提交" in await plugin.handle_run_workflow(event(images=1), "改图", "水彩")
+        assert "queued" in await plugin.handle_run_workflow(event(images=1), "改图", "水彩")
+        await finish_jobs(plugin)
         assert "3/width" not in values(plugin)
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
 
 
 def test_boolean_default_is_normalized_before_submission(plugin):
@@ -396,9 +412,10 @@ def test_boolean_default_is_normalized_before_submission(plugin):
         node_id="5", field_name="enabled", value_type="text", param_type="boolean", field_value="1"))
 
     async def run():
-        assert "已提交" in await plugin.handle_run_workflow(event(images=1), "改图", "水彩")
+        assert "queued" in await plugin.handle_run_workflow(event(images=1), "改图", "水彩")
+        await finish_jobs(plugin)
         assert values(plugin)["5/enabled"] == "true"
-    asyncio.run(run())
+    asyncio.run(with_jobs(run(), plugin))
 
 
 @pytest.mark.parametrize("raw", ["0e-999999999", "0e999999999", "1e999999999"])

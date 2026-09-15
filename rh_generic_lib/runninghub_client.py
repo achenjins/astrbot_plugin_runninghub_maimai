@@ -28,6 +28,14 @@ _MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 class RunningHubError(RuntimeError):
     """RunningHub API 调用失败时抛出的异常。"""
 
+    def __init__(self, message: str, *, task_status: str = "") -> None:
+        super().__init__(message)
+        self.task_status = task_status
+
+
+class RunningHubTransportError(RunningHubError):
+    """响应未知或临时故障；提交后不得自动重试。"""
+
 
 class RunningHubClient:
     """RunningHub 工作流客户端。"""
@@ -41,6 +49,7 @@ class RunningHubClient:
         timeout: int = 120,
         poll_interval: int = 10,
         max_wait: int = 1800,
+        query_retries: int = 3,
     ) -> None:
         self.base_url = str(base_url or "").rstrip("/")
         self.api_key = str(api_key or "")
@@ -48,6 +57,7 @@ class RunningHubClient:
         self.timeout = int(timeout)
         self.poll_interval = int(poll_interval)
         self.max_wait = int(max_wait)
+        self.query_retries = max(0, int(query_retries))
 
     @staticmethod
     def _headers(api_key: str) -> dict[str, str]:
@@ -72,9 +82,16 @@ class RunningHubClient:
                     timeout=self.timeout,
                 )
                 response.raise_for_status()
-                return response.json()
-            except requests.RequestException as exc:
-                raise RunningHubError(f"请求失败: {exc}") from exc
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise RunningHubTransportError("响应不是 JSON 对象，无法确认请求状态")
+                return result
+            except requests.HTTPError as exc:
+                status = getattr(exc.response, "status_code", 0)
+                error = RunningHubError if 400 <= status < 500 and status not in {408, 429} else RunningHubTransportError
+                raise error(f"请求失败 HTTP {status}") from exc
+            except (requests.RequestException, ValueError) as exc:
+                raise RunningHubTransportError(f"请求响应不可用: {exc}") from exc
 
         return await asyncio.to_thread(_do)
 
@@ -115,7 +132,8 @@ class RunningHubClient:
         task_id = result.get("taskId")
         if not task_id:
             error_message = result.get("errorMessage") or ""
-            raise RunningHubError(f"提交任务失败: {error_message or json.dumps(result, ensure_ascii=False)}")
+            error = RunningHubError if error_message or result.get("errorCode") or result.get("code") not in (None, 0, 200) else RunningHubTransportError
+            raise error(f"提交任务未获确认: {error_message or json.dumps(result, ensure_ascii=False)[:500]}")
         return str(task_id)
 
     async def query(self, task_id: str) -> dict[str, Any]:
@@ -141,6 +159,8 @@ class RunningHubClient:
         if not self.api_key:
             raise RunningHubError("未配置 API Key")
         result = await self._post("/uc/openapi/accountStatus", {"apikey": self.api_key})
+        if not isinstance(result, dict):
+            raise RunningHubError("API 响应不是 JSON 对象")
         code = result.get("code")
         if code not in (0, 200, None):
             raise RunningHubError(
@@ -168,7 +188,7 @@ class RunningHubClient:
 
     async def download_base64(self, url: str) -> str:
         """下载图片并以 base64 字符串返回（供 send.image 使用）。"""
-        content = await self.download_bytes(url)
+        content = await self.download_bytes(url, max_bytes=20 * 1024 * 1024)
         return base64.b64encode(content).decode("ascii")
 
     async def download_bytes(self, url: str, *, max_bytes: int = _MAX_DOWNLOAD_BYTES) -> bytes:
@@ -224,6 +244,8 @@ class RunningHubClient:
                 raise RunningHubError(f"上传失败: {exc}") from exc
 
         result = await asyncio.to_thread(_do)
+        if not isinstance(result, dict):
+            raise RunningHubError("API 响应不是 JSON 对象")
         code = result.get("code")
         # 该接口成功码为 0；个别部署也可能返回 200
         if code not in (0, 200, None):
@@ -277,6 +299,8 @@ class RunningHubClient:
                 raise RunningHubError(f"获取工作流失败: {exc}") from exc
 
         result = await asyncio.to_thread(_do)
+        if not isinstance(result, dict):
+            raise RunningHubError("API 响应不是 JSON 对象")
         code = result.get("code")
         # 兼容新旧成功码：文档为 0，新接口（如上传）实际返回 200
         if code not in (0, 200, None):
@@ -284,6 +308,8 @@ class RunningHubClient:
                 f"获取工作流失败: {result.get('msg') or result.get('message') or json.dumps(result, ensure_ascii=False)[:500]}"
             )
         data = result.get("data") or {}
+        if not isinstance(data, dict):
+            raise RunningHubError("获取工作流失败: data 不是 JSON 对象")
         prompt = data.get("prompt")
         if prompt is None:
             raise RunningHubError(f"获取工作流失败: 响应缺少 data.prompt: {json.dumps(result, ensure_ascii=False)[:500]}")
@@ -316,7 +342,16 @@ class RunningHubClient:
         limit = max(interval, int(max_wait if max_wait is not None else self.max_wait))
         waited = 0
         while waited < limit:
-            result = await self.query(task_id)
+            for attempt in range(self.query_retries + 1):
+                try:
+                    result = await self.query(task_id)
+                    if not isinstance(result, dict):
+                        raise RunningHubTransportError("查询响应不是 JSON 对象")
+                    break
+                except RunningHubTransportError:
+                    if attempt >= self.query_retries:
+                        raise
+                    await asyncio.sleep(min(interval * (attempt + 1), 60))
             status = str(result.get("status") or "").upper()
             if status == "SUCCESS":
                 return result
@@ -328,7 +363,11 @@ class RunningHubClient:
                     or (f"任务状态为 {status}" if status.startswith("CANCEL") else "")
                     or json.dumps(result, ensure_ascii=False)[:500]
                 )
-                raise RunningHubError(f"任务执行失败: {reason}")
+                raise RunningHubError(f"任务执行失败: {reason}", task_status=status)
+            if status not in {"QUEUED", "PENDING", "RUNNING", "PROCESSING"}:
+                if result.get("errorMessage") or result.get("errorCode") or result.get("code") not in (None, 0, 200):
+                    raise RunningHubError(f"查询被拒绝: {str(result)[:500]}")
+                raise RunningHubTransportError("查询未返回已知任务状态")
             await asyncio.sleep(interval)
             waited += interval
         raise TimeoutError(f"任务 {task_id} 在 {limit} 秒内未完成")

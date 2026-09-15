@@ -59,6 +59,9 @@ class GenerationSection(BaseModel):
 
     __ui_label__ = "生成参数"
 
+    max_queued: int = Field(default=10, ge=0, le=100, description="运行名额之外允许等待的任务数，0 表示不排队")
+    query_retries: int = Field(default=3, ge=0, le=10, description="查询遇到临时网络错误时的重试次数，0 表示不重试")
+
     poll_interval: int = Field(
         default=15, ge=3, description="任务轮询间隔（秒）", json_schema_extra={"label": "轮询间隔（秒）"}
     )
@@ -79,6 +82,10 @@ class FeatureSection(BaseModel):
     __ui_label__ = "功能设置"
 
     media_history_minutes: int = Field(default=60, ge=1, le=1440, description="聊天图片、任务复用与补发结果保留分钟数")
+    recent_images: int = Field(default=5, ge=0, le=20, description="每个用户会话保留最近使用的图片数，0 关闭并清空图片记忆")
+    avatar_candidates: bool = Field(default=True, description="允许将当前 QQ 用户头像、群头像作为候选素材")
+    image_descriptions: bool = Field(default=True, description="为使用过的图片生成并缓存约50字简介；失败不阻断生成")
+    vision_model: str = Field(default="", description="图片简介使用的 AstrBot 模型提供商 ID；留空使用当前会话模型")
 
     enable: bool = Field(
         default=False,
@@ -93,8 +100,8 @@ class FeatureSection(BaseModel):
     )
     result_notice: bool = Field(
         default=True,
-        description="生成结果发出后，是否由插件追加一条「生成完成」确认消息（AstrBot 没有 Maisaka 主动回复能力，此处为迁移后的简化实现）",
-        json_schema_extra={"label": "完成后发确认消息"},
+        description="结果发送后，沿用原会话的模型与人格回复一次，并记录完成状态；模型不可用时发送简短结果通知",
+        json_schema_extra={"label": "完成后触发机器人回复"},
     )
     use_llm: bool = Field(
         default=True,
@@ -218,6 +225,7 @@ class WorkflowItemSection(BaseModel):
 
     description: str = Field(default="", max_length=1000, description="用途与适用场景，供自然语言选择工作流")
     llm_enabled: bool = Field(default=True, description="允许自然语言调用")
+    output_type: Literal["auto", "image", "video", "audio", "file"] = Field(default="auto", description="工作流成品类型，用于选流和无扩展名结果的识别")
 
     name: str = Field(
         default="",
@@ -385,6 +393,7 @@ def _workflow_dict_from_raw(entry: dict[str, Any]) -> dict[str, Any] | None:
         "llm_template_path": str(entry.get("llm_template_path") or "").strip(),
         "description": str(entry.get("description") or "").strip(),
         "llm_enabled": bool(entry.get("llm_enabled", True)),
+        "output_type": str(entry.get("output_type") or "auto"),
         "input_nodes": [],
     }
 
@@ -462,6 +471,7 @@ def dump_workflow_items(items: list[WorkflowItemSection]) -> list[dict[str, Any]
             "llm_template_path": str(wf.llm_template_path or ""),
             "description": wf.description,
             "llm_enabled": wf.llm_enabled,
+            "output_type": wf.output_type,
         }
         for wf in items
     ]
@@ -519,12 +529,18 @@ def build_config_model(data: dict[str, Any]) -> GenericConfig:
             "api_key_cn": str(_s(server, "api_key_cn", "")),
         },
         "generation": {
+            "max_queued": int(_s(generation, "max_queued", 10)),
+            "query_retries": int(_s(generation, "query_retries", 3)),
             "poll_interval": int(_s(generation, "poll_interval", 15)),
             "max_wait": int(_s(generation, "max_wait", 1800)),
             "max_concurrent": int(_s(generation, "max_concurrent", 2)),
             "download_timeout": int(_s(generation, "download_timeout", 120)),
         },
         "feature": {
+            "recent_images": int(_s(feature, "recent_images", 5)),
+            "avatar_candidates": bool(_s(feature, "avatar_candidates", True)),
+            "image_descriptions": bool(_s(feature, "image_descriptions", True)),
+            "vision_model": str(_s(feature, "vision_model", "")).strip(),
             "media_history_minutes": int(_s(feature, "media_history_minutes", 60)),
             "enable": bool(_s(feature, "enable", False)),
             "recall_seconds": int(_s(feature, "recall_seconds", 90)),
@@ -559,12 +575,18 @@ def dump_config_dict(config: GenericConfig) -> dict[str, Any]:
             "api_key_cn": str(config.server.api_key_cn or ""),
         },
         "generation": {
+            "max_queued": config.generation.max_queued,
+            "query_retries": config.generation.query_retries,
             "poll_interval": int(config.generation.poll_interval),
             "max_wait": int(config.generation.max_wait),
             "max_concurrent": int(config.generation.max_concurrent),
             "download_timeout": int(config.generation.download_timeout),
         },
         "feature": {
+            "recent_images": config.feature.recent_images,
+            "avatar_candidates": config.feature.avatar_candidates,
+            "image_descriptions": config.feature.image_descriptions,
+            "vision_model": config.feature.vision_model,
             "media_history_minutes": config.feature.media_history_minutes,
             "enable": bool(config.feature.enable),
             "recall_seconds": int(config.feature.recall_seconds),

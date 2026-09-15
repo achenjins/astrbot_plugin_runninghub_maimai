@@ -59,6 +59,18 @@
         "description": "下载结果超时（秒）",
         "type": "int",
         "default": 120
+      },
+      "max_queued": {
+        "description": "等待队列容量（0 表示不排队）",
+        "type": "int",
+        "default": 10,
+        "hint": "0–100，运行中的任务另计"
+      },
+      "query_retries": {
+        "description": "临时查询故障重试次数",
+        "type": "int",
+        "default": 3,
+        "hint": "0–10，耗尽后保留任务编号与并发名额，可用 /wf状态 恢复"
       }
     }
   },
@@ -79,10 +91,10 @@
         "hint": "0 表示不撤回"
       },
       "result_notice": {
-        "description": "完成后追加「生成完成」确认消息",
+        "description": "完成后触发机器人回复",
         "type": "bool",
         "default": true,
-        "hint": "AstrBot 没有 Maisaka 主动回复，迁移后由插件直接发送确认"
+        "hint": "结果发送后沿用原会话的模型与人格回复一次；关闭后仍记录完成状态，模型不可用时发送简短结果通知"
       },
       "use_llm": {
         "description": "用 LLM 识别输入节点与配置节点",
@@ -109,6 +121,30 @@
         "type": "int",
         "default": 60,
         "hint": "1–1440 分钟；按平台、会话和用户隔离，记录过期后无法从插件补发"
+      },
+      "recent_images": {
+        "description": "每用户会话的最近图片数量",
+        "type": "int",
+        "default": 5,
+        "hint": "0–20，0 关闭并清空；保存实际使用及生成的图片，按内容去重"
+      },
+      "avatar_candidates": {
+        "description": "提供当前用户及群头像候选",
+        "type": "bool",
+        "default": true
+      },
+      "image_descriptions": {
+        "description": "为最近图片生成简短描述",
+        "type": "bool",
+        "default": true,
+        "hint": "视觉模型失败不影响原图使用"
+      },
+      "vision_model": {
+        "description": "图片描述使用的模型提供商",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空使用当前会话模型，需要支持图片输入"
       }
     }
   },
@@ -204,6 +240,19 @@
             "description": "允许自然语言调用",
             "type": "bool",
             "default": true
+          },
+          "output_type": {
+            "description": "输出类型",
+            "type": "string",
+            "default": "auto",
+            "options": [
+              "auto",
+              "image",
+              "video",
+              "audio",
+              "file"
+            ],
+            "hint": "用于选择工作流以及平台未返回类型时的结果发送"
           }
         }
       }

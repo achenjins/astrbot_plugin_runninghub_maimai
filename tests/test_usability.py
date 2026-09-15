@@ -14,7 +14,7 @@ import main as plugin_main
 from rh_generic_lib.config import InputNodeSection
 from rh_generic_lib.delivery import Delivery, DeliveryTarget, OneBotChannel
 from rh_generic_lib.validation import validate_node
-from .test_chat_workflows import PNG, event, plugin  # noqa: F401
+from .test_chat_workflows import PNG, event, plugin, finish_jobs  # noqa: F401
 from .test_plugin import FakeContext
 
 
@@ -44,6 +44,7 @@ def test_upload_guidance_tracks_roles_and_only_optional_inputs_can_be_skipped(pl
         assert "风格参考（图片，可跳过）" in messages(plugin)[0]
         plugin.context.sent.clear()
         await plugin.handle_input_collector(event("跳过剩余", mid="3"))
+        await finish_jobs(plugin)
         assert len(plugin._client.submissions) == 1
         assert len(messages(plugin)) == 1  # one acknowledgement of the accepted task
         assert not plugin._input_sessions
@@ -107,7 +108,6 @@ async def completed_task(plugin, request, urls, task_id="finished-1"):
     plugin._client.wait_for_result = result
     plugin._client.download_base64 = download
     plugin._task_meta[task_id] = {"name": "改图", "region": "overseas"}
-    await plugin._semaphore.acquire()
     await plugin_main.RunningHubGenericPlugin._poll_and_send(
         plugin, task_id, request.unified_msg_origin, client=plugin._client, kwargs=plugin._event_ctx(request))
 
@@ -131,7 +131,7 @@ def test_partial_delivery_retries_only_failed_image_from_cache_after_reload(plug
         assert any("第 2 项" in text and "/wf补发 finished-1" in text for text in messages(plugin))
         plugin._media_store = None
         plugin.config.access.max_per_user_per_hour = 1
-        plugin._user_requests["10001"] = [time.time()]
+        await (await plugin._load_task_journal()).update("quota-task", status="success", user_id="10001", submitted_at=time.time(), delivery_status="sent")
         await plugin.handle_resend_result(event("/wf补发 finished-1", mid="2"))
         assert len(image_attempts) == 3
         assert len(plugin._client.downloads) == 2  # resend reads the second cached image
@@ -139,7 +139,7 @@ def test_partial_delivery_retries_only_failed_image_from_cache_after_reload(plug
         assert all(output["sent"] for output in record["outputs"])
         assert any("已补发 1 项，未重新生成" in text for text in messages(plugin))
         assert len(plugin._task_history) == 1
-        assert plugin._semaphore._value == plugin.config.generation.max_concurrent
+        assert plugin._limiter.active == 0
     asyncio.run(run())
     assert not plugin._client.submissions and not plugin._client.uploads
 
@@ -167,8 +167,9 @@ def test_result_selection_and_expired_records_do_not_generate(plugin, monkeypatc
         record = next(iter(plugin._get_media_store().deliveries.values()))
         monkeypatch.setattr("rh_generic_lib.media_store.time.time", lambda: record["created_at"] + 3601)
         plugin.context.sent.clear()
-        await plugin.handle_resend_result(event("/wf补发 finished-1"))
-        assert "过期" in messages(plugin)[0]
+        await plugin.handle_resend_result(event("/wf补发 finished-1", mid="expired-resend"))
+        assert sum(isinstance(c, Image) for _, chain in plugin.context.sent for c in chain.chain) == 2
+        assert any("已补发 2 项" in text for text in messages(plugin))
     asyncio.run(run())
     assert not plugin._client.submissions
 

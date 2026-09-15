@@ -46,6 +46,17 @@ class DeliveryTarget:
     platform_id: str = ""
     event: AstrMessageEvent | None = field(default=None, repr=False)
 
+    def __post_init__(self):
+        # AstrBot UMO: platform:GroupMessage:group or platform:FriendMessage:user.
+        parts = self.stream_id.split(":", 2)
+        if len(parts) == 3:
+            self.platform_id = self.platform_id or parts[0]
+            kind = parts[1].replace("_", "").lower()
+            if kind == "groupmessage":
+                self.group_id = self.group_id or parts[2]
+            elif kind == "friendmessage":
+                self.user_id = self.user_id or parts[2]
+
     @classmethod
     def from_event(cls, event: AstrMessageEvent) -> "DeliveryTarget":
         return cls(
