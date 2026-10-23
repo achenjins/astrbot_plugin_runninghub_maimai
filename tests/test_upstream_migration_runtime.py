@@ -9,15 +9,15 @@ import pytest
 from rh_generic_lib.delivery import DeliveryReceipt
 from rh_generic_lib.media_store import MediaStore
 from rh_generic_lib.runninghub_client import RunningHubBusyError, RunningHubError, RunningHubTransportError
-from .test_chat_workflows import event, finish_jobs, plugin  # noqa: F401
+from .test_chat_workflows import JOB_TIMEOUT, event, plugin  # noqa: F401
 from .test_task_runtime import runtime, submit  # noqa: F401
 
 
 async def drain(star):
     """Include a worker explicitly rescheduled by the preceding worker's callback."""
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(JOB_TIMEOUT):
         while star._pending:
-            await finish_jobs(star)
+            await asyncio.gather(*list(star._pending.values()))
             await asyncio.sleep(0)
 
 

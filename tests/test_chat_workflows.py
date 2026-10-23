@@ -20,6 +20,8 @@ from .test_plugin import FakeContext, FakeEvent
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"test image"
+# Real durable writes can exceed five seconds on shared Windows CI disks.
+JOB_TIMEOUT = 30
 
 
 def event(text="", *, images=0, user="10001", group="20001", mid="1", messages=None):
@@ -73,7 +75,7 @@ def plugin(tmp_path, monkeypatch):
 
 async def finish_jobs(plugin):
     if plugin._pending:
-        await asyncio.wait_for(asyncio.gather(*list(plugin._pending.values())), 5)
+        await asyncio.wait_for(asyncio.gather(*list(plugin._pending.values())), JOB_TIMEOUT)
 
 
 async def with_jobs(coro, plugin):
