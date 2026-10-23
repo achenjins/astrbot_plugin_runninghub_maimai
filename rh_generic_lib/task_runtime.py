@@ -76,6 +76,8 @@ class TaskRuntimeMixin:
                         data, _ = await self._materialize_media(self._get_media_store(), owner, ref, client, snapshot=entry)
                     else:
                         data = await client.download_bytes(source, max_bytes=limit)
+                elif str(entry.get("source") or "").startswith("base64://"):
+                    data = await self._read_media_source(entry["source"], None, limit)
                 else:
                     source = entry["source"]
                     path = trusted_local_file(source, self._trusted_file_roots())

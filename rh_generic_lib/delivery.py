@@ -134,17 +134,19 @@ class GenericAstrBotChannel(BaseDeliveryChannel):
         self.logger = logger
 
     async def send_text(self, target: DeliveryTarget, text: str) -> bool:
+        return (await self.send_text_result(target, text)).success
+
+    async def send_text_result(self, target: DeliveryTarget, text: str) -> DeliveryReceipt:
         if not target.stream_id or not str(text or ""):
-            return False
+            return DeliveryReceipt(False)
         try:
-            return bool(
-                await self.context.send_message(
-                    target.stream_id, MessageChain().message(str(text))
-                )
+            sent = await self.context.send_message(
+                target.stream_id, MessageChain().message(str(text))
             )
+            return DeliveryReceipt(bool(sent))
         except Exception as exc:
-            self.logger.warning("通用通道发送文本失败: %s", exc)
-            return False
+            self.logger.warning("通用通道文本发送状态未知: %s", exc)
+            return DeliveryReceipt(False, uncertain=True)
 
     async def send_image(self, target: DeliveryTarget, image_base64: str) -> str:
         return (await self.send_image_result(target, image_base64)).message_id
@@ -403,20 +405,21 @@ class Delivery:
         return self._generic
 
     async def send_text(self, target: DeliveryTarget, text: str) -> bool:
-        """发送文本。
+        return (await self.send_text_result(target, text)).success
 
-        AstrBot 通用通道是首选（支持所有已接入平台）；通用通道失败时，
-        且目标带 OneBot 群号/用户号，再尝试 OneBot 直发兜底。
-        """
-        if await self._generic.send_text(target, text):
-            return True
+    async def send_text_result(self, target: DeliveryTarget, text: str) -> DeliveryReceipt:
+        """发送文本；只有明确失败才尝试其他通道，回执未知时保留人工确认。"""
+        receipt = await self._generic.send_text_result(target, text)
+        if receipt.success or receipt.uncertain:
+            return receipt
         bot = self.get_onebot_client(target)
         if bot is not None and (target.group_id or target.user_id):
             try:
-                return await OneBotChannel(bot, self.logger).send_text(target, text)
+                sent = await OneBotChannel(bot, self.logger).send_text(target, text)
+                return DeliveryReceipt(sent)
             except DeliveryUncertain:
-                return False
-        return False
+                return DeliveryReceipt(False, uncertain=True)
+        return receipt
 
     async def send_image(self, target: DeliveryTarget, image_base64: str, *, need_message_id: bool = False) -> str:
         return (await self.send_image_result(target, image_base64, need_message_id=need_message_id)).message_id

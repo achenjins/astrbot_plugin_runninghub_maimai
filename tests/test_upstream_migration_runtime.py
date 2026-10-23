@@ -2,6 +2,7 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -323,6 +324,54 @@ def test_delivery_retries_only_explicit_failures_without_another_generation(runt
         await drain(runtime)
         job = runtime._task_journal.get(first["task_id"])
         assert len(calls) == attempts and len(runtime._client.submissions) == 1
+        assert job["status"] == "success"
+        assert job["outputs"][0]["sent"] is (failure == "definite")
+        assert job["outputs"][0]["uncertain"] is (failure != "definite")
+        assert job["delivery_status"] == ("sent" if failure == "definite" else "uncertain")
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind,extension", [("audio", "mp3"), ("file", "zip")])
+@pytest.mark.parametrize("failure,generic_attempts,native_attempts", [
+    ("generic_timeout", 1, 0), ("native_timeout", 1, 1), ("definite", 2, 1),
+])
+def test_result_links_preserve_uncertain_receipts_and_only_retry_definite_failures(
+        runtime, kind, extension, failure, generic_attempts, native_attempts):
+    async def run():
+        url = "https://example.test/result." + extension
+        generic_calls, native_calls = [], []
+        original_send = runtime.context.send_message
+
+        async def result(task_id):
+            return {"status": "SUCCESS", "results": [{"url": url, "type": kind}]}
+
+        async def send(session, chain):
+            text = "".join(str(getattr(part, "text", "")) for part in chain.chain)
+            if url in text:
+                generic_calls.append(text)
+                if failure == "generic_timeout":
+                    raise TimeoutError("accepted, but acknowledgement lost")
+                if len(generic_calls) == 1:
+                    return False
+            return await original_send(session, chain)
+
+        class Bot:
+            async def call_action(self, action, **params):
+                native_calls.append((action, params))
+                if failure == "native_timeout":
+                    raise TimeoutError("accepted, but acknowledgement lost")
+                return {"status": "failed", "retcode": 100}
+
+        runtime.context.send_message = send
+        runtime.context.platform_inst = SimpleNamespace(get_client=lambda: Bot())
+        runtime._client.wait_for_result = result
+        runtime.config.generation.delivery_retries = 2
+        first = await submit(runtime)
+        await drain(runtime)
+        job = runtime._task_journal.get(first["task_id"])
+        assert len(generic_calls) == generic_attempts
+        assert len(native_calls) == native_attempts
+        assert len(runtime._client.submissions) == 1
         assert job["status"] == "success"
         assert job["outputs"][0]["sent"] is (failure == "definite")
         assert job["outputs"][0]["uncertain"] is (failure != "definite")

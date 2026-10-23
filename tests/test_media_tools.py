@@ -1,5 +1,6 @@
 """Native AstrBot media tools: scoped discovery, reusable images and typed plans."""
 import asyncio
+import base64
 import json
 from types import SimpleNamespace
 
@@ -210,6 +211,94 @@ def test_audio_download_and_adapter_decoding_obey_configured_file_limit(plugin):
         assert limits == [1024 * 1024]
         with pytest.raises(ValueError, match="大小上限"):
             await plugin._adapter_media_bytes({"data": {"base64": "A" * (2 * 1024 * 1024)}}, plugin._client, 1024 * 1024)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind,component,data,extension", [
+    ("audio", Record, b"ID3voice", ".mp3"),
+    ("video", Video, b"\x00\x00\x00\x18ftypmp42video", ".mp4"),
+])
+def test_base64_media_is_preserved_before_acknowledgement_then_uploaded_and_submitted(
+        plugin, monkeypatch, kind, component, data, extension):
+    plugin._workflows[0].input_nodes[1] = InputNodeSection(
+        node_id="2", field_name=kind, value_type=kind, label="参考素材", required=True)
+    scheduled = []
+    monkeypatch.setattr(plugin, "_schedule_job", lambda record: scheduled.append(record["task_id"]))
+
+    async def run():
+        request = event(messages=[component(file="base64://" + base64.b64encode(data).decode())])
+        catalog = json.loads(await plugin._media_catalog_tool(request, "current", kind))
+        ref = catalog["media"][0]["media_id"]
+        result = json.loads(await plugin._run_natural_workflow(
+            request, "改图", "生成作品", media_bindings={"参考素材": ref}))
+        task_id = result["task_id"]
+        assert result["status"] == "queued" and scheduled == [task_id]
+        item = plugin._task_journal.get(task_id)["inputs"][ref]
+        assert item["type"] == kind and item["filename"].endswith(extension)
+        assert await plugin._get_task_inputs().read_async(task_id, item) == data
+        assert not plugin._client.uploads and not plugin._client.submissions
+
+        # The task must use its retained bytes even if the chat reference expires.
+        plugin._get_other_media_registry().entries.clear()
+        await plugin._run_job(task_id)
+        assert plugin._task_journal.get(task_id)["status"] == "success"
+        assert plugin._client.uploads == [(data, item["filename"])]
+        assert len(plugin._client.submissions) == 1
+        nodes = {node["fieldName"]: node["fieldValue"] for node in plugin._client.submissions[0][0]}
+        assert nodes[kind] == "api/upload-1.png"
+        assert not plugin._client.downloads
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind,component,header", [
+    ("audio", Record, b"ID3"),
+    ("video", Video, b"\x00\x00\x00\x18ftypmp42"),
+])
+def test_oversized_base64_media_cannot_be_reserved_uploaded_or_submitted(plugin, kind, component, header):
+    plugin.config.generation.max_file_mb = 1
+    plugin._workflows[0].input_nodes[1] = InputNodeSection(
+        node_id="2", field_name=kind, value_type=kind, label="参考素材", required=True)
+    data = header + b"x" * (1024 * 1024 + 1 - len(header))
+
+    async def run():
+        request = event(messages=[component(file="base64://" + base64.b64encode(data).decode())])
+        catalog = json.loads(await plugin._media_catalog_tool(request, "current", kind))
+        ref = catalog["media"][0]["media_id"]
+        result = json.loads(await plugin._run_natural_workflow(
+            request, "改图", "生成作品", media_bindings={"参考素材": ref}))
+        assert "大小上限" in result["message"]
+        assert not (await plugin._load_task_journal()).records()
+        assert not list(plugin._get_task_inputs().root.glob("rh-*"))
+        assert not plugin._client.uploads and not plugin._client.submissions
+        assert not plugin._client.downloads
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("source_kind", ["path", "file_uri", "remote_file_uri", "unc"])
+def test_preserving_media_still_rejects_untrusted_local_paths(plugin, tmp_path, monkeypatch, source_kind):
+    allowed = tmp_path / "cache"
+    allowed.mkdir()
+    private = tmp_path / "private.mp3"
+    private.write_bytes(b"ID3private")
+    monkeypatch.setattr("rh_generic_lib.file_source.tempfile.gettempdir", lambda: str(allowed))
+    monkeypatch.setattr(plugin, "_trusted_file_roots", lambda: [allowed])
+    source = {"path": str(private), "file_uri": private.as_uri(),
+              "remote_file_uri": "file://server/share/private.mp3",
+              "unc": r"\\server\share\private.mp3"}[source_kind]
+    plugin._workflows[0].input_nodes[1] = InputNodeSection(
+        node_id="2", field_name="audio", value_type="audio", label="参考素材", required=True)
+
+    async def run():
+        request = event()
+        owner = MediaStore.owner(plugin._event_ctx(request))
+        entry = plugin._get_other_media_registry().remember(
+            owner, "audio", source, message_id="earlier", position=1, origin="current")
+        result = json.loads(await plugin._run_natural_workflow(
+            request, "改图", "生成作品", media_bindings={"参考素材": entry["ref"]}))
+        assert "参考素材缓存不可用" in result["message"]
+        assert not (await plugin._load_task_journal()).records()
+        assert not plugin._client.uploads and not plugin._client.submissions
+        assert not plugin._client.downloads
     asyncio.run(run())
 
 

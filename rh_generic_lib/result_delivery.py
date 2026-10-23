@@ -92,8 +92,9 @@ class ResultDeliveryMixin:
         elif self._is_video_url(url, output_type):
             receipt = await self.delivery.send_video_result(target, url, need_message_id=recall)
         else:
-            sent = await self.delivery.send_text(target, f"任务 {task_id} 结果 {index + 1}：{url}")
-            receipt = DeliveryReceipt(sent, as_link=sent)
+            text_receipt = await self.delivery.send_text_result(target, f"任务 {task_id} 结果 {index + 1}：{url}")
+            receipt = DeliveryReceipt(text_receipt.success, text_receipt.message_id,
+                                      as_link=text_receipt.success, uncertain=text_receipt.uncertain)
         if receipt.success and recall and receipt.message_id:
             self._schedule_recall(receipt.message_id, self.config.feature.recall_seconds, platform_id=target.platform_id)
         return receipt, "" if receipt.success else "发送状态未知，请先确认是否收到，再决定补发" if receipt.uncertain else "发送未成功，请检查 QQ 连接后补发"
