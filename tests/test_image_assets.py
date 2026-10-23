@@ -180,6 +180,21 @@ def test_missing_group_fields_are_recovered_from_astrbot_session():
     assert target.platform_id == "qq" and target.group_id == "222" and target.user_id == "111"
 
 
+def test_saved_results_do_not_evict_reference_images_and_memory_ttl_is_configurable(plugin):
+    async def run():
+        plugin.config.feature.recent_images = 1
+        plugin.config.feature.image_memory_hours = 36
+        owner = MediaStore.owner(plugin._event_ctx(event()))
+        original = await plugin._remember_image_usage(owner, "reference", PNG, description="输入角色")
+        generated_ref = plugin._remember_generated_image("output", 1, "https://example.test/output.png",
+                                                        event().unified_msg_origin, plugin._event_ctx(event()))
+        await plugin._remember_image_usage(owner, generated_ref, PNG + b"generated", description="输出成图")
+        memory = await plugin._memory_candidates(owner)
+        assert [item["memory_id"] for item in memory] == [original["memory_id"]]
+        assert plugin._image_memory.ttl_seconds == 36 * 3600
+    asyncio.run(run())
+
+
 def test_group_image_file_resolves_adapter_url_and_is_cached_for_later(plugin):
     async def run():
         calls = []

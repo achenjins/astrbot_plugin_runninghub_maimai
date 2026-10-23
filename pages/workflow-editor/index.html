@@ -488,6 +488,8 @@ dialog::backdrop{background:var(--overlay)}
           </select>
         </div>
         <div class="field"><label for="nodeLabel">输入说明</label><input id="nodeLabel" maxlength="64" placeholder="例如：角色参考图"></div>
+        <div class="field"><label for="nodeInputKey">输入别名（可选）</label><input id="nodeInputKey" maxlength="80" placeholder="例如：subject 或 first_frame"></div>
+        <div class="field"><label for="nodeRole">素材用途（可选）</label><input id="nodeRole" maxlength="200" placeholder="例如：人物主体、风格、首帧"></div>
         <div class="field full"><label for="nodeValue">默认值 / 输入内容</label><input id="nodeValue" placeholder="留空则运行时由用户提供或等待上传"></div>
         <div class="field full"><label class="check-row"><input type="checkbox" id="nodeRequired"> 必填输入（没有默认值时需补充，必填文件不能跳过）</label></div>
         <div class="field full"><div class="hint">输入说明也用于自然语言识别图片角色，例如“人物参考图”“风格参考图”。以下约束仅用于可编辑配置。</div></div>
@@ -589,7 +591,7 @@ const taskHistoryState = { records: [], loading: false, loaded: false, updatedAt
 let currentTab = "workflows";
 let workflowDialogIndex = -1;
 let nodeDialogState = { wf: -1, node: -1 };
-let analyzeState = { wf: -1, nodes: [], method: "" };
+let analyzeState = { wf: -1, nodes: [], method: "", settings: {} };
 let confirmResolver = null;
 
 const $ = (id) => document.getElementById(id);
@@ -876,9 +878,11 @@ function normalizeNode(raw) {
   return {
     node_id: String(raw?.node_id || "").trim(),
     field_name: String(raw?.field_name || "prompt").trim() || "prompt",
-    field_value: String(raw?.field_value || ""),
+    field_value: String(raw?.field_value ?? ""),
     value_type: valueType === "auto" ? "" : valueType,
     label: String(raw?.label || "").trim(),
+    input_key: String(raw?.input_key || "").trim(),
+    role: String(raw?.role || "").trim(),
     required: Boolean(raw?.required),
     param_type: raw?.param_type || "string",
     minimum: raw?.minimum === "" || raw?.minimum == null ? null : Number(raw.minimum),
@@ -952,7 +956,7 @@ function filterWorkflows() {
       if (!q) return { wf, index, nodes: wf.nodes };
       const wfHit = [wf.name, wf.workflow_id].some((v) => String(v).toLowerCase().includes(q));
       const nodes = wfHit ? wf.nodes : wf.nodes.filter((node) =>
-        [node.node_id, node.field_name, node.label, node.field_value, node.value_type]
+        [node.node_id, node.field_name, node.label, node.input_key, node.role, node.field_value, node.value_type]
           .some((v) => String(v).toLowerCase().includes(q))
       );
       return nodes.length ? { wf, index, nodes } : null;
@@ -1176,6 +1180,7 @@ function saveWorkflowFromDialog() {
   const duplicate = state.workflows.findIndex((wf, i) => wf.name === name && i !== workflowDialogIndex);
   if (duplicate >= 0) return toast(`工作流名称「${name}」已存在`, "err");
   const data = {
+    ...(workflowDialogIndex >= 0 ? clone(state.workflows[workflowDialogIndex]) : {}),
     name,
     description: $("wfDescription").value.trim(),
     llm_enabled: $("wfLlmEnabled").checked,
@@ -1214,6 +1219,8 @@ function openNodeDialog(wfIndex, nodeIndex) {
   $("nodeValue").value = node?.field_value || "";
   $("nodeType").value = node?.value_type || "";
   $("nodeLabel").value = node?.label || "";
+  $("nodeInputKey").value = node?.input_key || "";
+  $("nodeRole").value = node?.role || "";
   $("nodeRequired").checked = Boolean(node?.required);
   $("nodeParamType").value = node?.param_type || "string";
   $("nodeMin").value = node?.minimum ?? "";
@@ -1230,6 +1237,8 @@ function saveNodeFromDialog() {
     field_value: $("nodeValue").value,
     value_type: $("nodeType").value,
     label: $("nodeLabel").value,
+    input_key: $("nodeInputKey").value,
+    role: $("nodeRole").value,
     required: $("nodeRequired").checked,
     param_type: $("nodeParamType").value,
     minimum: $("nodeMin").value,
@@ -1326,8 +1335,18 @@ async function runAnalyze() {
     if (!res || res.success === false) throw new Error(res?.message || "识别失败");
     analyzeState.nodes = (res.nodes || []).map(normalizeNode).filter((n) => n.node_id);
     analyzeState.method = res.method || "";
+    analyzeState.settings = {};
+    if (res.settings && typeof res.settings === "object" && !Array.isArray(res.settings)) {
+      for (const key of ["description", "llm_template_path", "output_type", "capability", "cost_hint", "prompt_profile"]) {
+        if (typeof res.settings[key] === "string") analyzeState.settings[key] = res.settings[key];
+      }
+      if (typeof res.settings.llm_enhance === "boolean") analyzeState.settings.llm_enhance = res.settings.llm_enhance;
+    }
+    const presetHint = Object.keys(analyzeState.settings).length
+      ? '<div class="hint" style="margin-bottom:8px">已匹配内置预设：替换节点时同时应用用途、扩写模板和输出设置；添加节点会保留现有工作流设置。</div>' : "";
     $("azResult").innerHTML = analyzeState.nodes.length
       ? `<div class="muted" style="margin-bottom:8px">识别方式：${esc(analyzeState.method)} · 共 ${analyzeState.nodes.length} 个候选节点</div>` +
+        presetHint +
         `<div class="analyze-selectbar"><label><input type="checkbox" id="azSelectAll" checked> 全选</label><span class="spacer"></span><span id="azSelectedCount"></span></div>` +
         analyzeState.nodes.map((n, i) =>
           `<label class="node-chip selectable"><input type="checkbox" data-az-node="${i}" checked> ${esc(n.node_id)} · ${esc(n.field_name)} · ${esc(typeMeta(effectiveType(n)).label)}${n.label ? ` · ${esc(n.label)}` : ""}</label>`
@@ -1338,6 +1357,8 @@ async function runAnalyze() {
     updateAnalyzeSelection();
     toast(`识别完成：${analyzeState.nodes.length} 个候选节点，请勾选要添加的节点`, "ok");
   } catch (err) {
+    analyzeState.nodes = [];
+    analyzeState.settings = {};
     $("azResult").innerHTML = `<div class="muted" style="color:var(--danger)">${esc(String(err?.message || err))}</div>`;
     $("azReplaceBtn").hidden = true;
     $("azMergeBtn").hidden = true;
@@ -1370,11 +1391,22 @@ function applyAnalyze(mode) {
     toast("请先勾选要添加的节点", "warn");
     return;
   }
+  const preserveInputMetadata = (node) => {
+    const previous = wf.nodes.find((n) => n.node_id === node.node_id && n.field_name === node.field_name);
+    return {
+      ...clone(node),
+      input_key: node.input_key || previous?.input_key || "",
+      role: node.role || previous?.role || ""
+    };
+  };
+  const appliedNodes = selected.map(preserveInputMetadata);
+  const appliedPreset = mode === "replace" && Object.keys(analyzeState.settings).length > 0;
   mutate(() => {
     if (mode === "replace") {
-      wf.nodes = clone(selected);
+      wf.nodes = appliedNodes;
+      if (appliedPreset) Object.assign(wf, clone(analyzeState.settings));
     } else {
-      for (const node of selected) {
+      for (const node of appliedNodes) {
         const index = wf.nodes.findIndex((n) => n.node_id === node.node_id && n.field_name === node.field_name);
         if (index >= 0) wf.nodes[index] = node;
         else wf.nodes.push(node);
@@ -1382,13 +1414,13 @@ function applyAnalyze(mode) {
     }
   });
   $("analyzeDialog").close();
-  toast(mode === "replace" ? "已替换为选中节点" : `已添加 ${selected.length} 个选中节点`, "ok");
+  toast(appliedPreset ? "已替换节点并应用内置预设配置（记得保存）" : mode === "replace" ? "已替换为选中节点" : `已添加 ${selected.length} 个选中节点，保留现有工作流设置`, "ok");
 }
 
 function openAnalyzeDialog(wfIndex) {
   const wf = state.workflows[wfIndex];
   if (!wf) return;
-  analyzeState = { wf: wfIndex, nodes: [], method: "" };
+  analyzeState = { wf: wfIndex, nodes: [], method: "", settings: {} };
   $("azWorkflowName").textContent = `${wf.name} · ${wf.workflow_id}`;
   $("azRegion").value = wf.region === "domestic" ? "domestic" : "overseas";
   $("azDetailed").checked = false;

@@ -86,8 +86,8 @@ def test_completed_delivery_stays_known_after_poll_cleanup(plugin):
 @pytest.mark.parametrize("error,status", [
     (TimeoutError("timeout"), "tracking_paused"),
     (plugin_main.RunningHubError("refused"), "needs_attention"),
-    (plugin_main.RunningHubError("bad input", task_status="FAILED"), "failed"),
-    (plugin_main.RunningHubError("cancelled", task_status="CANCELLED"), "cancelled"),
+    (plugin_main._client_lib.RunningHubTaskError("bad input", status="FAILED"), "failed"),
+    (plugin_main._client_lib.RunningHubTaskError("cancelled", status="CANCELLED"), "cancelled"),
 ])
 def test_poll_errors_do_not_claim_running_or_success(plugin, error, status):
     async def fail(*args):
@@ -120,7 +120,7 @@ def test_submitting_task_is_visible_and_cannot_be_submitted_again(plugin):
         await started.wait()
         context = json.loads(await plugin.handle_workflow_context(event(mid="query")))
         assert context["recent_runs"][0]["status"] == "submitting"
-        duplicate = json.loads(await plugin.handle_run_workflow(event(images=1), "改图", "油画"))
+        duplicate = json.loads(await plugin.handle_run_workflow(event(images=1), "改图", "水彩"))
         assert duplicate["status"] == "submitting"
         release.set()
         await first

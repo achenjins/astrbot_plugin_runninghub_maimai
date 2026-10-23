@@ -12,11 +12,14 @@ from contextlib import asynccontextmanager
 from .config import WorkflowItemSection
 from .delivery import DeliveryTarget
 from .media_store import MediaStore
-from .runninghub_client import RunningHubError, RunningHubTransportError
+from .runninghub_client import RunningHubBusyError, RunningHubError, RunningHubTransportError
 from .task_journal import ACTIVE_STATUSES, TaskJournal
 from .task_inputs import TaskInputs
 from .file_source import trusted_local_file
 from .media_store import MAX_IMAGE_BYTES
+from .upstream.background_io import finish_in_thread
+from .upstream.file_source import prepare_upload
+from .upstream.media_plan import request_fingerprint
 
 
 class TaskRuntimeMixin:
@@ -31,45 +34,105 @@ class TaskRuntimeMixin:
         context = request.get("context", {})
         owner = MediaStore.owner(context)
         self._avatar_scopes[owner] = context.copy()
-        refs = dict.fromkeys(context.get("image_bindings", {}).values())
+        bindings = {**context.get("image_bindings", {}), **context.get("media_bindings", {})}
+        sources = {**context.get("image_sources", {}), **context.get("media_sources", {})}
+        refs = dict.fromkeys(bindings.values())
         for ref in refs:
             if ref in inputs:
-                self._get_task_inputs().read(task_id, inputs[ref])
+                await self._get_task_inputs().read_async(task_id, inputs[ref])
                 continue
             source = ""
+            entry = sources.get(ref)
+            kind = (entry or {}).get("type") or "image"
+            limit = MAX_IMAGE_BYTES if kind == "image" else self.config.generation.max_file_mb * 1024 * 1024
             if ref.startswith("avatar:"):
                 if local_only:
                     continue
                 data = await self._read_special_image(owner, ref, self._get_client(request["workflow"]["region"]))
             elif ref.startswith("im-"):
                 data = await self._read_special_image(owner, ref, None)
+            elif entry and entry.get("memory_id"):
+                data = await self._read_special_image(owner, entry["memory_id"], None)
             else:
                 # Snapshot avoids pruning the shared cache before its bytes are copied.
-                entry = context.get("image_sources", {}).get(ref)
                 if not entry:
-                    entry = self._get_media_store().get(owner, ref)
-                source = entry["source"]
-                if source.startswith(("http://", "https://")):
+                    if hasattr(self, "_media_entry"):
+                        entry = await self._media_entry(owner, ref)
+                    else:
+                        entry = self._get_media_store().get(owner, ref)
+                if entry.get("memory_id"):
+                    data = await self._read_special_image(owner, entry["memory_id"], None)
+                elif kind != "image" and entry.get("file_id"):
                     if local_only:
                         continue
                     client = self._get_client(request["workflow"]["region"])
-                    data = await client.download_bytes(source, max_bytes=MAX_IMAGE_BYTES)
+                    data, _ = await self._materialize_media(self._get_media_store(), owner, ref, client, snapshot=entry)
+                elif str(entry.get("source") or "").startswith(("http://", "https://")):
+                    source = entry["source"]
+                    if local_only:
+                        continue
+                    client = self._get_client(request["workflow"]["region"])
+                    if kind != "image" and hasattr(self, "_materialize_media"):
+                        data, _ = await self._materialize_media(self._get_media_store(), owner, ref, client, snapshot=entry)
+                    else:
+                        data = await client.download_bytes(source, max_bytes=limit)
                 else:
+                    source = entry["source"]
                     path = trusted_local_file(source, self._trusted_file_roots())
-                    if path is None or path.stat().st_size > MAX_IMAGE_BYTES:
-                        raise ValueError("参考图片缓存不可用或超过 20MB，请重新发送")
-                    data = path.read_bytes()
-            inputs[ref] = self._get_task_inputs().put(task_id, data, self._guess_filename(source, "image", data))
+                    if path is None or path.stat().st_size > limit:
+                        raise ValueError(f"参考素材缓存不可用或超过 {limit // (1024 * 1024)}MB，请重新发送")
+                    data = await finish_in_thread(path.read_bytes)
+            filename, data = await finish_in_thread(prepare_upload, kind, data)
+            inputs[ref] = {**await self._get_task_inputs().put_async(task_id, data, filename, max_bytes=limit), "type": kind}
             if not local_only:
                 if not await self._task_journal.update(task_id, inputs=inputs, expected_statuses={"queued"}):
                     return inputs
         return inputs
 
-    def _release_terminal_inputs(self, task_id):
+    async def _submit_remote_job(self, record, workflow, nodes, client):
+        """Retry only a confirmed busy refusal; unknown paid submissions never retry."""
+        journal, task_id = self._task_journal, record["task_id"]
+        attempt = 0
+        busy_since = float(record.get("busy_since") or time.time())
+        while True:
+            try:
+                return await client.submit(nodes, instance_type=workflow.instance_type, workflow_id=workflow.workflow_id)
+            except RunningHubBusyError as exc:
+                latest = journal.get(task_id)
+                if latest["cancel_requested"]:
+                    await journal.update(task_id, status="cancelled", submitted_at=0, message="已取消尚未创建的平台任务")
+                    await self._notify_job(journal.get(task_id))
+                    return None
+                if time.time() - busy_since >= self.config.generation.busy_max_wait:
+                    await journal.update(task_id, status="failed", submitted_at=0,
+                                         message="平台持续繁忙，已放弃；任务未创建，未扣费")
+                    await self._notify_job(journal.get(task_id))
+                    return None
+                if not await journal.update(task_id, status="queued", submitted_at=0, busy_since=busy_since,
+                                            submitted_nodes=nodes, stage="platform_queue", message=f"平台并发已满，等待重新提交：{str(exc)[:200]}",
+                                            expected_statuses={"submitting"}):
+                    return None
+                if not attempt:
+                    await self._notify_job(journal.get(task_id), "平台正在排队；本次尚未创建任务，空闲后会自动提交。")
+                attempt += 1
+                await asyncio.sleep(min(120, self.config.generation.busy_retry_seconds * attempt))
+                latest = journal.get(task_id)
+                if latest["status"] != "queued":
+                    return None
+                context = latest["request"].get("context", {})
+                allowed, reason = self._check_access(latest["user_id"], latest["group_id"], check_quota=False,
+                                                     natural_language=bool(context.get("natural")))
+                if not allowed:
+                    raise ValueError(reason)
+                if not await journal.update(task_id, status="submitting", stage="submitting", submitted_at=time.time(),
+                                            message="重新提交已确认未创建的任务", expected_statuses={"queued"}):
+                    return None
+
+    async def _release_terminal_inputs(self, task_id):
         record = self._task_journal.get(task_id)
         if record and record["status"] not in ACTIVE_STATUSES and task_id.startswith("rh-"):
             try:
-                self._get_task_inputs().release(task_id)
+                await self._get_task_inputs().release_async(task_id)
             except (OSError, ValueError) as exc:
                 self.logger.warning("清理任务素材失败 %s: %s", task_id, exc)
 
@@ -79,27 +142,74 @@ class TaskRuntimeMixin:
         await self._task_journal.load()
         return self._task_journal
 
-    async def _find_event_job(self, context):
+    async def _generation_identity(self, context, workflow, nodes):
+        owner = MediaStore.owner(context)
+        bindings = {**context.get("image_bindings", {}), **context.get("media_bindings", {})}
+        sources = {**context.get("image_sources", {}), **context.get("media_sources", {})}
+        memory = await self._load_image_memory()
+        identities = {}
+        for key, ref in bindings.items():
+            saved = memory.find(owner, "images", ref) if memory else None
+            source = sources.get(ref, {})
+            if saved:
+                identity = ["saved", saved["memory_id"]]
+            elif source.get("message_id"):
+                identity = ["message", source["message_id"], source.get("position", source.get("index", 0))]
+            else:
+                identity = ["ref", ref]
+            identities[key] = identity
+        normalized_nodes = copy.deepcopy(nodes)
+        normalized_workflow = copy.deepcopy(workflow)
+        for node in normalized_nodes:
+            key = f"{node['nodeId']}/{node['fieldName']}"
+            if key in identities and str(node.get("fieldValue", "")).startswith(("rh-image-ref:", "rh-media-ref:")):
+                node["fieldValue"] = identities[key]
+        for node in normalized_workflow.get("input_nodes", []):
+            key = f"{node['node_id']}/{node['field_name']}"
+            if key in identities and str(node.get("field_value", "")).startswith(("rh-image-ref:", "rh-media-ref:")):
+                node["field_value"] = identities[key]
+        return {"workflow": normalized_workflow,
+                "nodes": sorted(normalized_nodes, key=lambda n: (n["nodeId"], n["fieldName"])),
+                "skip_enhance": bool(context.get("skip_enhance"))}
+
+    async def _find_event_job(self, context, workflow=None, nodes=None):
         anchor = context.get("anchor_id")
         if not anchor:
             return None
         journal = await self._load_task_journal()
         owner = MediaStore.owner(context)
-        return next((r for r in journal.records() if r.get("anchor_id") == anchor
-                     and MediaStore.owner(r) == owner), None)
+        records = [r for r in journal.records() if r.get("anchor_id") == anchor and MediaStore.owner(r) == owner]
+        if workflow is None or nodes is None:
+            return records[0] if len(records) == 1 else None
+        identity = await self._generation_identity(context, workflow, nodes)
+        request_key = request_fingerprint(owner, context["user_id"], anchor, identity)
+        matched = journal.find_request(request_key)
+        if matched:
+            return matched
+        # A reference can acquire a stable memory alias after its first use. Compare
+        # actual generation content with today's alias mapping, not stale metadata.
+        for record in records:
+            request = record["request"]
+            prior = await self._generation_identity(request.get("context", {}), request.get("workflow", {}), request.get("nodes", []))
+            if prior == identity:
+                return record
+        return None
 
     async def _reserve_job(self, client, workflow, node_info_list, stream_id, kwargs):
         context = {**kwargs, "stream_id": stream_id}
         if not MediaStore.owner(context):
             return {"success": False, "message": "无法识别当前用户或会话"}
+        if context.get("natural") and not context.get("anchor_id"):
+            return {"success": False, "message": "无法定位本次请求的触发消息，请重新发送生成要求"}
         try:
             async with self._request_lock:
                 journal = await self._load_task_journal()
-                previous = await self._find_event_job(context)
+                previous = await self._find_event_job(context, workflow.model_dump(), node_info_list)
                 if previous:
                     return {"success": True, "duplicate": True, "task_id": previous["task_id"],
                             "status": previous["status"], "message": "本条消息的任务已记录，请勿重复生成"}
-                allowed, reason = self._check_access(context["user_id"], context.get("group_id", ""), check_quota=False)
+                allowed, reason = self._check_access(context["user_id"], context.get("group_id", ""), check_quota=False,
+                                                     natural_language=bool(context.get("natural")))
                 if not allowed:
                     raise ValueError(reason)
                 limit = self.config.access.max_per_user_per_hour
@@ -112,18 +222,20 @@ class TaskRuntimeMixin:
                 saved_context = {k: copy.deepcopy(context[k]) for k in (
                     "user_id", "group_id", "platform_id", "platform_name", "stream_id", "anchor_id",
                     "result_context", "image_bindings", "image_sources", "natural", "skip_enhance",
-                    "actual_file_desc", "trigger") if k in context}
+                    "actual_file_desc", "trigger", "media_bindings", "media_sources") if k in context}
                 request = {"workflow": workflow.model_dump(), "nodes": copy.deepcopy(node_info_list),
                            "context": saved_context}
+                identity = await self._generation_identity(saved_context, request["workflow"], request["nodes"])
+                request_key = request_fingerprint(MediaStore.owner(context), context["user_id"], context.get("anchor_id", ""), identity)
                 task_id = "rh-" + uuid.uuid4().hex[:16]
                 try:
                     inputs = await self._preserve_job_inputs(task_id, request, local_only=True)
                     await journal.update(task_id, status="queued", stage="preparing_inputs", inputs=inputs,
-                                         submitted_at=0, request=request, workflow=workflow.name, region=workflow.region,
+                                         submitted_at=0, request_key=request_key, request=request, workflow=workflow.name, region=workflow.region,
                                          **{k: context.get(k, "") for k in ("stream_id", "user_id", "group_id", "platform_id", "platform_name", "anchor_id")})
                 except BaseException:
                     if not journal.get(task_id):
-                        self._get_task_inputs().release(task_id)
+                        await self._get_task_inputs().release_async(task_id)
                     raise
                 await self._limiter.resize(self.config.generation.max_concurrent)
                 self._schedule_job(journal.get(task_id))
@@ -134,22 +246,24 @@ class TaskRuntimeMixin:
                 self._set_workflow_run_state(task_id, stream_id, kwargs, "queued", "已记录，等待后台处理")
                 result = {"success": True, "task_id": task_id, "status": "queued",
                           "message": f"已接手，任务 {task_id} 将在后台运行，完成后通知。"}
-                source_event = kwargs.get("natural_event")
-                if source_event is not None:
-                    source_event.set_extra("rh_natural_result", self._job_tool_result(result))
+                blocked = sum(r["status"] in {"unknown_submission", "needs_attention"} for r in journal.records())
+                if blocked >= self.config.generation.max_concurrent:
+                    result["notice"] = f"有 {blocked} 个任务待管理员核对并占用名额；用 /wf状态 查看，再用 /wf核对 处理。"
                 return result
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RunningHubError) as exc:
             return {"success": False, "message": str(exc)}
 
     @staticmethod
     def _job_tool_result(result):
         return json.dumps({"task_id": result.get("task_id", ""), "status": result.get("status", "queued"),
                            "message": result.get("message", "任务已记录，后台完成后会通知"),
-                           "stop_after_execution": True, "next_action": "等待后台通知，结束本轮工具调用，不要轮询或重复生成"}, ensure_ascii=False)
+                           "notice": result.get("notice", ""),
+                           "stop_after_execution": True, "next_action": "仅提交用户明确要求的不同生成；相同内容不重提，完成后等待后台通知，不要轮询"}, ensure_ascii=False)
 
     def _schedule_job(self, record):
         task_id = record["task_id"]
         if task_id in self._pending and not self._pending[task_id].done():
+            self._reschedule_requested.add(task_id)
             return
         self._task_meta[task_id] = {**{k: record.get(k, "") for k in (
             "stream_id", "user_id", "group_id", "platform_id", "platform_name", "region")}, "name": record["workflow"]}
@@ -163,6 +277,11 @@ class TaskRuntimeMixin:
                 self._task_meta.pop(task_id, None)
             if not finished.cancelled() and finished.exception():
                 self.logger.error("后台任务 %s 异常: %s", task_id, finished.exception())
+            if task_id in self._reschedule_requested:
+                self._reschedule_requested.discard(task_id)
+                if not finished.cancelled() and latest and (latest["status"] in {"queued", "pending", "tracking_paused", "needs_attention"}
+                        or latest["status"] == "success" and latest["delivery_status"] in {"pending", "partial", "failed"}):
+                    self._schedule_job(latest)
         task.add_done_callback(done)
 
     @asynccontextmanager
@@ -182,7 +301,7 @@ class TaskRuntimeMixin:
     async def _resume_pending_tasks(self):
         journal = await self._load_task_journal()
         try:
-            self._get_task_inputs().sweep({r["task_id"] for r in journal.records() if r["status"] in ACTIVE_STATUSES})
+            await self._get_task_inputs().sweep_async({r["task_id"] for r in journal.records() if r["status"] in ACTIVE_STATUSES})
         except (OSError, ValueError) as exc:
             self.logger.warning("清理已结束任务素材失败: %s", exc)
         await self._limiter.resize(self.config.generation.max_concurrent)
@@ -220,44 +339,48 @@ class TaskRuntimeMixin:
                 context = record["request"]["context"]
                 if record["status"] == "queued":
                     await journal.update(task_id, started_at=record.get("started_at") or time.time(), stage="uploading")
-                    allowed, reason = self._check_access(record["user_id"], record["group_id"], check_quota=False)
+                    allowed, reason = self._check_access(record["user_id"], record["group_id"], check_quota=False,
+                                                         natural_language=bool(context.get("natural")))
                     if not allowed:
                         raise ValueError(reason)
                     workflow = WorkflowItemSection.model_validate(record["request"]["workflow"])
-                    nodes = copy.deepcopy(record["request"]["nodes"])
+                    nodes = copy.deepcopy(record.get("submitted_nodes") or record["request"]["nodes"])
                     owner = MediaStore.owner(record)
                     self._avatar_scopes[owner] = context.copy()
                     uploaded = {}
                     for node in nodes:
-                        ref = context.get("image_bindings", {}).get(f"{node['nodeId']}/{node['fieldName']}")
-                        if ref and node["fieldValue"].startswith("rh-image-ref:"):
+                        bindings = {**context.get("image_bindings", {}), **context.get("media_bindings", {})}
+                        ref = bindings.get(f"{node['nodeId']}/{node['fieldName']}")
+                        if ref and node["fieldValue"].startswith(("rh-image-ref:", "rh-media-ref:")):
                             await journal.update(task_id, message="准备参考图片")
                             if ref not in uploaded:
                                 item = journal.get(task_id)["inputs"][ref]
-                                data, filename = self._get_task_inputs().read(task_id, item), item["filename"]
-                                if not ref.startswith(("im-", "avatar:")):
+                                data, filename = await self._get_task_inputs().read_async(task_id, item), item["filename"]
+                                if item.get("type", "image") == "image" and not ref.startswith(("im-", "avatar:")):
                                     try:
                                         self._get_media_store().cache(owner, ref, data)
                                     except (ValueError, OSError) as exc:
                                         self.logger.debug("任务素材已保存，聊天缓存不可用: %s", exc)
-                                await self._remember_image_usage(owner, ref, data)
+                                if item.get("type", "image") == "image":
+                                    await self._remember_image_usage(owner, ref, data, origin="reference")
                                 uploaded[ref] = await client.upload_file(data, filename)
                             node["fieldValue"] = uploaded[ref]
                     prompt_node = self._first_prompt_node(workflow)
-                    if prompt_node and workflow.llm_enhance and not context.get("skip_enhance"):
+                    if prompt_node and workflow.llm_enhance and not context.get("skip_enhance") and not record.get("submitted_nodes"):
                         await journal.update(task_id, stage="enhancing", message="扩写提示词")
                         original = next((n["fieldValue"] for n in nodes if n["nodeId"] == prompt_node.node_id and n["fieldName"] == prompt_node.field_name), "")
                         enhanced = await self._enhance_text(workflow, original, stream_id=record["stream_id"],
                                                            actual_file_desc=context.get("actual_file_desc", ""))
                         nodes = self._patch_text_value(nodes, prompt_node.node_id, prompt_node.field_name, enhanced)
-                    allowed, reason = self._check_access(record["user_id"], record["group_id"], check_quota=False)
+                    allowed, reason = self._check_access(record["user_id"], record["group_id"], check_quota=False,
+                                                         natural_language=bool(context.get("natural")))
                     if not allowed:
                         raise ValueError(reason)
                     if not await journal.update(task_id, status="submitting", stage="submitting", submitted_at=time.time(), message="提交 RunningHub",
                                                 expected_statuses={"queued"}):
                         return
                     try:
-                        remote = await client.submit(nodes, instance_type=workflow.instance_type, workflow_id=workflow.workflow_id)
+                        remote = await self._submit_remote_job(record, workflow, nodes, client)
                     except RunningHubTransportError:
                         await journal.update(task_id, status="unknown_submission", message="提交响应丢失，需核对平台任务，禁止自动重新生成")
                         await self._notify_job(journal.get(task_id))
@@ -265,6 +388,8 @@ class TaskRuntimeMixin:
                     except RunningHubError as exc:
                         await journal.update(task_id, status="failed", submitted_at=0, message=f"提交被拒绝：{exc}")
                         await self._notify_job(journal.get(task_id))
+                        return
+                    if remote is None:
                         return
                     await journal.update(task_id, status="pending", stage="polling", remote_task_id=str(remote), message="等待平台结果")
                     try:
@@ -278,7 +403,15 @@ class TaskRuntimeMixin:
                 if record["remote_task_id"]:
                     await journal.update(task_id, status="pending", stage="polling", message="正在查询原平台任务",
                                          expected_statuses={"tracking_paused", "needs_attention"})
-                await self._poll_and_send(task_id, record["stream_id"], client=client, kwargs=context)
+                while True:
+                    await self._poll_and_send(task_id, record["stream_id"], client=client, kwargs=context)
+                    latest = journal.get(task_id)
+                    if latest["status"] != "tracking_paused" or not self.config.generation.auto_resume_tracking:
+                        break
+                    await asyncio.sleep(self.config.generation.tracking_retry_seconds)
+                    if not await journal.update(task_id, status="pending", stage="polling", message="继续查询原平台任务",
+                                                expected_statuses={"tracking_paused"}):
+                        break
         except asyncio.CancelledError:
             record = journal.get(task_id)
             if record["status"] == "submitting":
@@ -300,7 +433,7 @@ class TaskRuntimeMixin:
             await journal.update(task_id, **updates)
             await self._notify_job(journal.get(task_id))
         finally:
-            self._release_terminal_inputs(task_id)
+            await self._release_terminal_inputs(task_id)
 
     async def _poll_job(self, task_id, stream_id, *, client=None, kwargs=None):
         journal = await self._load_task_journal()
@@ -318,7 +451,7 @@ class TaskRuntimeMixin:
         try:
             result = await client.wait_for_result(record["remote_task_id"])
         except (RunningHubError, TimeoutError) as exc:
-            remote_status = getattr(exc, "task_status", "")
+            remote_status = str(getattr(exc, "task_status", "") or getattr(exc, "status", ""))
             status = ("cancelled" if remote_status.startswith("CANCEL") else "failed" if remote_status in {"FAILED", "ERROR"}
                       else "tracking_paused" if isinstance(exc, (RunningHubTransportError, TimeoutError)) else "needs_attention")
             if await journal.update(task_id, status=status, message=str(exc)[:300], expected_statuses=ACTIVE_STATUSES):
@@ -374,7 +507,10 @@ class TaskRuntimeMixin:
             return
         summary = message or f"任务 {job['task_id']}（{job['workflow']}）状态：{status}。{job.get('message', '')}"
         if status in {"tracking_paused", "needs_attention"}:
-            summary += f" 保留平台编号 {job['remote_task_id']} 和运行名额；处理配置后用 /wf状态 {job['task_id']} 恢复查询，不要重复生成。"
+            if status == "tracking_paused" and self.config.generation.auto_resume_tracking:
+                summary += f" 保留平台编号 {job['remote_task_id']}，稍后继续查询已有任务，不会重新生成。"
+            else:
+                summary += f" 保留平台编号 {job['remote_task_id']} 和运行名额；处理配置后用 /wf状态 {job['task_id']} 恢复查询，不要重复生成。"
         elif status == "unknown_submission":
             summary += f" 管理员请用 /wf核对 {job['task_id']} 平台任务ID（或 未创建）处理。"
         record = {"task_id": job["task_id"], "workflow": job["workflow"], "status": status, "outputs": job["outputs"],
@@ -429,7 +565,7 @@ class TaskRuntimeMixin:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
         self._task_meta.pop(task_id, None)
-        self._release_terminal_inputs(task_id)
+        await self._release_terminal_inputs(task_id)
         await self._limiter.resize(self.config.generation.max_concurrent)
         if announce:
             await self._notify_job(journal.get(task_id))
@@ -477,25 +613,37 @@ class TaskRuntimeMixin:
             return
         tokens = self._extract_text_from_event(event).split()
         if len(tokens) != 3:
-            await self.delivery.send_text(target, "用法：/wf核对 本地任务ID 平台任务ID；确认平台没有创建任务后填 未创建。")
+            await self.delivery.send_text(target, "用法：/wf核对 本地任务ID 平台任务ID；确认未创建填 未创建；放弃跟踪填 放弃（不会取消平台任务）。")
             return
         try:
             async with self._request_lock:
                 journal = await self._load_task_journal()
                 record = journal.get(tokens[1])
-                if not record or record["status"] != "unknown_submission":
-                    raise ValueError("只有提交未确认的任务需要核对。")
-                if tokens[2] == "未创建":
+                if not record or record["status"] not in {"unknown_submission", "needs_attention"}:
+                    raise ValueError("只有提交未确认或需要处理的任务需要核对。")
+                if tokens[2] == "放弃":
+                    await journal.update(record["task_id"], status="cancelled", message="管理员放弃跟踪；平台任务可能仍在运行",
+                                         expected_statuses={"unknown_submission", "needs_attention"})
+                    worker = self._pending.get(record["task_id"])
+                    if worker:
+                        worker.cancel()
+                        await asyncio.gather(worker, return_exceptions=True)
+                    await self._release_terminal_inputs(record["task_id"])
+                elif tokens[2] == "未创建":
+                    if record["remote_task_id"]:
+                        raise ValueError("已有平台编号不能标记未创建；需结束跟踪请使用 放弃。")
                     await journal.update(record["task_id"], status="cancelled", submitted_at=0,
                                          message="管理员已确认平台未创建任务", expected_statuses={"unknown_submission"})
-                    self._release_terminal_inputs(record["task_id"])
+                    await self._release_terminal_inputs(record["task_id"])
                 else:
                     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tokens[2]):
                         raise ValueError("平台任务 ID 格式不正确。")
-                    if any(r["remote_task_id"] == tokens[2] and r["region"] == record["region"] for r in journal.records()):
+                    if record["remote_task_id"] and tokens[2] != record["remote_task_id"]:
+                        raise ValueError("已有平台编号不可更换；请恢复原任务查询，或明确 放弃 跟踪。")
+                    if any(r["task_id"] != record["task_id"] and r["remote_task_id"] == tokens[2] and r["region"] == record["region"] for r in journal.records()):
                         raise ValueError("此平台任务已绑定其他记录，不能重复绑定。")
                     await journal.update(record["task_id"], status="pending", remote_task_id=tokens[2], message="管理员已核对平台编号",
-                                         expected_statuses={"unknown_submission"})
+                                         expected_statuses={"unknown_submission", "needs_attention"})
                     self._schedule_job(journal.get(record["task_id"]))
             await self._limiter.resize(self.config.generation.max_concurrent)
             await self.delivery.send_text(target, "已保存核对结果，未重新生成任务。")

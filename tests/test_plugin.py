@@ -714,7 +714,13 @@ def test_upload_file_uses_legacy_workflow_endpoint() -> None:
     client = client_module.RunningHubClient(
         api_key="k", base_url="https://www.runninghub.cn", timeout=10, workflow_id=""
     )
-    with patch("rh_generic_lib.runninghub_client.requests.post") as mock_post:
+    with patch("requests.Session.post") as mock_post:
+        from types import SimpleNamespace
+        mock_post.side_effect = [
+            SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"code": 404, "message": "unsupported"}),
+            SimpleNamespace(raise_for_status=lambda: None, json=lambda: {
+                "code": 0, "data": {"fileName": "api/abc.png", "fileType": "input"}}),
+        ]
         mock_post.return_value.json.return_value = {
             "code": 0,
             "msg": "success",
@@ -810,7 +816,8 @@ def test_account_status_requests_uc_endpoint() -> None:
     client = client_module.RunningHubClient(
         api_key="k", base_url="https://www.runninghub.cn", timeout=10, workflow_id=""
     )
-    with patch("rh_generic_lib.runninghub_client.requests.post") as mock_post:
+    with patch("requests.Session.post") as mock_post:
+        mock_post.return_value.status_code = 200
         mock_post.return_value.json.return_value = {
             "code": 0,
             "msg": "success",
@@ -1243,8 +1250,9 @@ def test_napcat_file_result_downloads_url_instead_of_decoding_as_base64(
     star: plugin_main.RunningHubGenericPlugin,
 ) -> None:
     class FakeClient:
-        async def download_bytes(self, url: str) -> bytes:
+        async def download_bytes(self, url: str, *, max_bytes: int) -> bytes:
             assert url == "https://files.example.test/text.md"
+            assert max_bytes == star.config.generation.max_file_mb * 1024 * 1024
             return "# 提示词\n一只猫".encode("utf-8")
 
     star._client = FakeClient()

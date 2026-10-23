@@ -16,6 +16,7 @@ from .test_usability import messages
 @pytest.fixture
 def runtime(plugin, monkeypatch):
     plugin.config.feature.image_descriptions = False
+    plugin.config.generation.auto_resume_tracking = False
     monkeypatch.setattr(plugin, "_poll_and_send", plugin_main.RunningHubGenericPlugin._poll_and_send.__get__(plugin))
 
     async def result(tid):
@@ -50,7 +51,7 @@ def test_queue_returns_while_upload_is_blocked_and_same_message_deduplicates(run
         runtime._client.upload_file = upload
         first = await asyncio.wait_for(submit(runtime), 2)
         await started.wait()
-        second = await submit(runtime, parameters={"width": 1024})
+        second = await submit(runtime)
         assert first["task_id"] == second["task_id"]
         assert first["stop_after_execution"] and not runtime._client.submissions
         assert runtime._task_journal.path.exists()

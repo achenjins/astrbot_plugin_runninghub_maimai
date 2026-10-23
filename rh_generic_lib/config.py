@@ -61,6 +61,12 @@ class GenerationSection(BaseModel):
 
     max_queued: int = Field(default=10, ge=0, le=100, description="运行名额之外允许等待的任务数，0 表示不排队")
     query_retries: int = Field(default=3, ge=0, le=10, description="查询遇到临时网络错误时的重试次数，0 表示不重试")
+    max_file_mb: int = Field(default=64, ge=1, le=512, description="单个音频、视频或结果文件上限（MB）；参考图片仍最多 20MB")
+    busy_retry_seconds: int = Field(default=15, ge=1, le=300, description="平台明确未创建任务、并发已满时再次排队的间隔")
+    busy_max_wait: int = Field(default=1800, ge=1, le=7200, description="平台持续繁忙时最多排队秒数，超时后放弃未创建的任务")
+    tracking_retry_seconds: int = Field(default=30, ge=1, le=300, description="已有平台任务查询暂时失败后继续跟踪的间隔")
+    auto_resume_tracking: bool = Field(default=True, description="暂时网络错误或查询超时后继续跟踪已有平台任务；明确拒绝仍需手动恢复")
+    delivery_retries: int = Field(default=2, ge=0, le=5, description="明确发送失败时重试次数；发送状态不确定时保留为人工补发")
 
     poll_interval: int = Field(
         default=15, ge=3, description="任务轮询间隔（秒）", json_schema_extra={"label": "轮询间隔（秒）"}
@@ -82,7 +88,8 @@ class FeatureSection(BaseModel):
     __ui_label__ = "功能设置"
 
     media_history_minutes: int = Field(default=60, ge=1, le=1440, description="聊天图片、任务复用与补发结果保留分钟数")
-    recent_images: int = Field(default=5, ge=0, le=20, description="每个用户会话保留最近使用的图片数，0 关闭并清空图片记忆")
+    recent_images: int = Field(default=20, ge=0, le=20, description="每个用户会话保留最近使用的图片数，0 关闭并清空图片记忆")
+    image_memory_hours: int = Field(default=24, ge=1, le=168, description="最近图片按最后使用时间保留的小时数，独立于聊天素材短缓存")
     avatar_candidates: bool = Field(default=True, description="允许将当前 QQ 用户头像、群头像作为候选素材")
     image_descriptions: bool = Field(default=True, description="为使用过的图片生成并缓存约50字简介；失败不阻断生成")
     vision_model: str = Field(default="", description="图片简介使用的 AstrBot 模型提供商 ID；留空使用当前会话模型")
@@ -124,6 +131,8 @@ class AccessSection(BaseModel):
     """访问控制与费用保护（默认全部放行，与旧版行为一致）。"""
 
     __ui_label__ = "访问控制"
+    allow_plugin_api: bool = Field(default=False, description="允许通过已鉴权的 AstrBot Web API 调用工作流；页面配置、余额与任务管理不受此开关影响")
+    natural_language_ignore_user_allowlist: bool = Field(default=False, description="自然语言调用只检查群白名单和次数限制；关闭时继续检查用户白名单")
 
     allow_users: list[str] = Field(
         default_factory=list,
@@ -198,7 +207,13 @@ class InputNodeSection(BaseModel):
         json_schema_extra={"label": "输入说明", "placeholder": "角色参考图"},
     )
     required: bool = Field(default=False, description="必填输入；没有默认值时必须补充，必填文件不能跳过")
+    input_key: str = Field(default="", max_length=80, description="可选的输入别名；运行时仍映射到节点ID/字段名")
+    role: str = Field(default="", max_length=200, description="素材用途，如首帧、尾帧、主体、风格")
     param_type: Literal["string", "integer", "number", "boolean"] = "string"
+
+    @property
+    def parameter_type(self) -> str:
+        return self.param_type
     minimum: float | None = Field(default=None, allow_inf_nan=False)
     maximum: float | None = Field(default=None, allow_inf_nan=False)
     choices: list[str] = Field(default_factory=list)
@@ -226,6 +241,9 @@ class WorkflowItemSection(BaseModel):
     description: str = Field(default="", max_length=1000, description="用途与适用场景，供自然语言选择工作流")
     llm_enabled: bool = Field(default=True, description="允许自然语言调用")
     output_type: Literal["auto", "image", "video", "audio", "file"] = Field(default="auto", description="工作流成品类型，用于选流和无扩展名结果的识别")
+    capability: str = Field(default="auto", max_length=80, description="工作流能力标识，供自然语言选择")
+    cost_hint: str = Field(default="", max_length=200, description="管理员填写的费用说明，不代表实时计费")
+    prompt_profile: str = Field(default="auto", max_length=32, description="提示词用途，如 image、edit、video 或 raw")
 
     name: str = Field(
         default="",
@@ -338,7 +356,9 @@ def _node_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
         "value_type": str(raw.get("value_type") or "").strip().lower(),
         "label": str(raw.get("label") or "").strip(),
         "required": bool(raw.get("required", False)),
-        "param_type": str(raw.get("param_type") or "string"),
+        "input_key": str(raw.get("input_key") or "").strip(),
+        "role": str(raw.get("role") or "").strip(),
+        "param_type": str(raw.get("param_type") or raw.get("parameter_type") or "string"),
         "minimum": raw.get("minimum") if raw.get("minimum") != "" else None,
         "maximum": raw.get("maximum") if raw.get("maximum") != "" else None,
         "choices": raw.get("choices") or [],
@@ -394,6 +414,9 @@ def _workflow_dict_from_raw(entry: dict[str, Any]) -> dict[str, Any] | None:
         "description": str(entry.get("description") or "").strip(),
         "llm_enabled": bool(entry.get("llm_enabled", True)),
         "output_type": str(entry.get("output_type") or "auto"),
+        "capability": str(entry.get("capability") or "auto"),
+        "cost_hint": str(entry.get("cost_hint") or ""),
+        "prompt_profile": str(entry.get("prompt_profile") or "auto"),
         "input_nodes": [],
     }
 
@@ -472,6 +495,9 @@ def dump_workflow_items(items: list[WorkflowItemSection]) -> list[dict[str, Any]
             "description": wf.description,
             "llm_enabled": wf.llm_enabled,
             "output_type": wf.output_type,
+            "capability": wf.capability,
+            "cost_hint": wf.cost_hint,
+            "prompt_profile": wf.prompt_profile,
         }
         for wf in items
     ]
@@ -492,6 +518,8 @@ def dump_workflow_nodes(items: list[WorkflowItemSection]) -> list[dict[str, Any]
                     "value_type": str(node.value_type or ""),
                     "label": str(node.label or ""),
                     "required": node.required,
+                    "input_key": node.input_key,
+                    "role": node.role,
                     "param_type": node.param_type,
                     "minimum": node.minimum,
                     "maximum": node.maximum,
@@ -531,13 +559,20 @@ def build_config_model(data: dict[str, Any]) -> GenericConfig:
         "generation": {
             "max_queued": int(_s(generation, "max_queued", 10)),
             "query_retries": int(_s(generation, "query_retries", 3)),
+            "max_file_mb": int(_s(generation, "max_file_mb", 64)),
+            "busy_retry_seconds": int(_s(generation, "busy_retry_seconds", 15)),
+            "busy_max_wait": int(_s(generation, "busy_max_wait", 1800)),
+            "tracking_retry_seconds": int(_s(generation, "tracking_retry_seconds", 30)),
+            "auto_resume_tracking": bool(_s(generation, "auto_resume_tracking", True)),
+            "delivery_retries": int(_s(generation, "delivery_retries", 2)),
             "poll_interval": int(_s(generation, "poll_interval", 15)),
             "max_wait": int(_s(generation, "max_wait", 1800)),
             "max_concurrent": int(_s(generation, "max_concurrent", 2)),
             "download_timeout": int(_s(generation, "download_timeout", 120)),
         },
         "feature": {
-            "recent_images": int(_s(feature, "recent_images", 5)),
+            "recent_images": int(_s(feature, "recent_images", 20)),
+            "image_memory_hours": int(_s(feature, "image_memory_hours", 24)),
             "avatar_candidates": bool(_s(feature, "avatar_candidates", True)),
             "image_descriptions": bool(_s(feature, "image_descriptions", True)),
             "vision_model": str(_s(feature, "vision_model", "")).strip(),
@@ -554,6 +589,8 @@ def build_config_model(data: dict[str, Any]) -> GenericConfig:
             ),
         },
         "access": {
+            "allow_plugin_api": bool(_s(access, "allow_plugin_api", False)),
+            "natural_language_ignore_user_allowlist": bool(_s(access, "natural_language_ignore_user_allowlist", False)),
             "allow_users": [str(u) for u in (_s(access, "allow_users", []) or [])],
             "allow_groups": [str(g) for g in (_s(access, "allow_groups", []) or [])],
             "max_per_user_per_hour": int(_s(access, "max_per_user_per_hour", 0)),
@@ -577,6 +614,12 @@ def dump_config_dict(config: GenericConfig) -> dict[str, Any]:
         "generation": {
             "max_queued": config.generation.max_queued,
             "query_retries": config.generation.query_retries,
+            "max_file_mb": config.generation.max_file_mb,
+            "busy_retry_seconds": config.generation.busy_retry_seconds,
+            "busy_max_wait": config.generation.busy_max_wait,
+            "tracking_retry_seconds": config.generation.tracking_retry_seconds,
+            "auto_resume_tracking": config.generation.auto_resume_tracking,
+            "delivery_retries": config.generation.delivery_retries,
             "poll_interval": int(config.generation.poll_interval),
             "max_wait": int(config.generation.max_wait),
             "max_concurrent": int(config.generation.max_concurrent),
@@ -584,6 +627,7 @@ def dump_config_dict(config: GenericConfig) -> dict[str, Any]:
         },
         "feature": {
             "recent_images": config.feature.recent_images,
+            "image_memory_hours": config.feature.image_memory_hours,
             "avatar_candidates": config.feature.avatar_candidates,
             "image_descriptions": config.feature.image_descriptions,
             "vision_model": config.feature.vision_model,
@@ -596,6 +640,8 @@ def dump_config_dict(config: GenericConfig) -> dict[str, Any]:
             "enhance_model": str(config.feature.enhance_model or ""),
         },
         "access": {
+            "allow_plugin_api": config.access.allow_plugin_api,
+            "natural_language_ignore_user_allowlist": config.access.natural_language_ignore_user_allowlist,
             "allow_users": [str(u) for u in config.access.allow_users],
             "allow_groups": [str(g) for g in config.access.allow_groups],
             "max_per_user_per_hour": int(config.access.max_per_user_per_hour),
