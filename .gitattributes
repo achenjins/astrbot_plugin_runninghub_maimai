@@ -1,2 +1,2 @@
-/rh_generic_lib/upstream/* text eol=lf
+/rh_generic_lib/upstream/* text eol=lf whitespace=-blank-at-eof
 /upstream-core.lock.json text eol=lf
