@@ -94,6 +94,7 @@ RunningHubClient = _client_lib.RunningHubClient
 RunningHubError = _client_lib.RunningHubError
 
 _detect_lib = _load_local_module("workflow_detect")
+_preset_lib = _load_local_module("workflow_presets")
 LLM_DETECT_KEY_PROMPT = _detect_lib.LLM_DETECT_KEY_PROMPT
 LLM_DETECT_PROMPT = _detect_lib.LLM_DETECT_PROMPT
 detect_input_nodes = _detect_lib.detect_input_nodes
@@ -112,6 +113,7 @@ TaskRuntimeMixin = _load_local_module("task_runtime").TaskRuntimeMixin
 TaskManagementMixin = _load_local_module("task_management").TaskManagementMixin
 TaskLimiter = _load_local_module("task_queue").TaskLimiter
 _file_source_lib = _load_local_module("file_source")
+_upload_lib = _load_local_module("upstream.file_source")
 
 
 __all__ = ["RunningHubGenericPlugin"]
@@ -204,6 +206,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         self._result_send_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._result_reply_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
         self._pending: dict[str, asyncio.Task] = {}
+        self._reschedule_requested: set[str] = set()
         self._recall_tasks: set[asyncio.Task] = set()
         self._input_sessions: dict[str, InputSession] = {}
         self._input_session_keys_by_stream: dict[str, set[str]] = {}
@@ -592,6 +595,11 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         self._prompt_interactions.clear()
         self._task_meta.clear()
         self._cancel_choices.clear()
+        self._reschedule_requested.clear()
+        for client in (self._client, self._client_cn):
+            close = getattr(client, "close", None)
+            if close:
+                await asyncio.to_thread(close)
         self._client = None
         self._client_cn = None
         self.logger.info("麦麦画师插件已卸载")
@@ -664,6 +672,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
     # ── 内部工具方法 ──────────────────────────────────────────────
 
     def _rebuild_client(self) -> None:
+        previous_clients = (self._client, self._client_cn)
         cfg = self.config
         kwargs = {
             "workflow_id": "",
@@ -671,6 +680,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             "poll_interval": cfg.generation.poll_interval,
             "max_wait": cfg.generation.max_wait,
             "query_retries": cfg.generation.query_retries,
+            "max_file_bytes": cfg.generation.max_file_mb * 1024 * 1024,
         }
         self._client = RunningHubClient(
             base_url=cfg.server.base_url, api_key=cfg.server.api_key, **kwargs
@@ -678,6 +688,10 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         self._client_cn = RunningHubClient(
             base_url=cfg.server.base_url_cn, api_key=cfg.server.api_key_cn, **kwargs
         )
+        for previous in previous_clients:
+            close = getattr(previous, "close", None)
+            if close:
+                close()
 
     def _get_client(self, region: str) -> RunningHubClient | None:
         """按区域返回对应客户端（overseas/domestic）。"""
@@ -695,7 +709,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                 return workflow
         return None
 
-    def _check_access(self, user_id: str, group_id: str, *, check_quota: bool = True) -> tuple[bool, str]:
+    def _check_access(self, user_id: str, group_id: str, *, check_quota: bool = True,
+                      natural_language: bool = False) -> tuple[bool, str]:
         """访问控制：白名单 + 每用户每小时频率限制。
 
         默认（未配置任何限制）返回 (True, "")，与旧版行为完全一致；
@@ -705,7 +720,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         uid = str(user_id or "").strip()
         gid = str(group_id or "").strip()
 
-        if cfg.allow_users:
+        if cfg.allow_users and not (natural_language and cfg.natural_language_ignore_user_allowlist):
             allowed_users = {str(u).strip() for u in cfg.allow_users if str(u).strip()}
             if not uid or uid not in allowed_users:
                 return False, "你没有使用本插件的权限"
@@ -1012,7 +1027,10 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         kwargs["group_id"] = group_id
         kwargs["platform_id"] = str(kwargs.get("platform_id") or chat_info.get("platform_id") or "")
         kwargs.setdefault("trigger", "command")
-        allowed, deny_msg = self._check_access(user_id, group_id)
+        if kwargs["trigger"] == "api" and not self.config.access.allow_plugin_api:
+            return {"success": False, "message": "工作流 API 调用未启用，请管理员在访问控制中开启允许其他插件调用"}
+        allowed, deny_msg = self._check_access(user_id, group_id, check_quota=False,
+                                              natural_language=bool(kwargs.get("natural")))
         if not allowed:
             return {"success": False, "message": deny_msg}
 
@@ -1460,7 +1478,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
                 node = session.waiting_nodes.pop(index)
                 try:
-                    filename = self._guess_filename(source, file_type, file_data)
+                    filename, file_data = await self._prepare_input_upload(file_type, file_data, source,
+                        {**session.chat_info, "stream_id": session.stream_id, "user_id": session.user_id})
                     file_name = await client.upload_file(file_data, filename)
                 except Exception as exc:
                     session.received_hashes.discard(digest)
@@ -1550,9 +1569,11 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             if node.get("maximum") is not None:
                 constraints.append(f"至多 {node['maximum']:g}")
             if node.get("choices"):
-                constraints.append("可选 " + " / ".join(node["choices"]))
+                constraints.append("回复选项序号或完整值")
             suffix = f"（{'；'.join(constraints)}）" if constraints else ""
             lines.append(f"{index}. {node['label']}：{value}{suffix}")
+            schema = InputNodeSection.model_validate({**node, "value_type": "text"})
+            lines.extend(f"   {choice}" for choice in _validation_lib.format_parameter_choices(schema))
         return "\n".join(lines)
 
     @staticmethod
@@ -1626,7 +1647,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             schema = {_chat_lib.node_key(n): n for n in self._ordered_nodes(session.workflow)}
             for index, item in enumerate(session.editable_nodes):
                 candidate = values[index] if index < len(values) and values[index] is not None else item["field_value"]
-                normalized = _chat_lib.parameter_value(schema[f"{item['node_id']}/{item['field_name']}"], candidate)
+                normalized = _validation_lib.command_parameter_value(schema[f"{item['node_id']}/{item['field_name']}"], candidate)
                 if index < len(values) and values[index] is not None:
                     values[index] = normalized
         except ValueError as exc:
@@ -1689,9 +1710,9 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             client, session.workflow, session.collected, stream_id, kwargs
         )
         source_event = session.execution_context.get("natural_event")
-        if source_event is not None and not result.get("success"):
-            prefix = "提交请求失败或未获确认，本轮不会自动重试，请核对 RunningHub 任务。" if result.get("submission_attempted") else "未提交任务："
-            source_event.set_extra("rh_natural_result", prefix + result["message"])
+        if source_event is not None:
+            self._update_natural_request_result(source_event, result,
+                request_key=session.execution_context.get("natural_request_key", ""))
         if result.get("success") and final_prompt:
             await self._record_recent_prompt(
                 session.workflow,
@@ -2218,22 +2239,46 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
     async def _fetch_file_bytes(self, source: str) -> bytes:
         """读取受信任的适配器缓存、受限 base64 或下载链接。"""
+        limit = self.config.generation.max_file_mb * 1024 * 1024
         if source.startswith("base64://"):
-            return _file_source_lib.decode_base64_bounded(source[9:], _MAX_FILE_BYTES)
+            return _file_source_lib.decode_base64_bounded(source[9:], limit)
         if source.startswith(("http://", "https://")):
             client = self._client or self._client_cn
             if client is None:
                 raise RunningHubError("客户端未初始化")
-            return await client.download_bytes(source, max_bytes=_MAX_FILE_BYTES)
+            return await client.download_bytes(source, max_bytes=limit)
         path = _file_source_lib.trusted_local_file(source, self._trusted_file_roots())
         if path is None:
             raise RunningHubError("文件不在允许的缓存目录中，请重新上传")
-        if path.stat().st_size > _MAX_FILE_BYTES:
-            raise RunningHubError("文件超过大小上限")
+        if path.stat().st_size > limit:
+            raise RunningHubError(f"文件超过 {self.config.generation.max_file_mb}MB 大小上限")
         data = await asyncio.to_thread(path.read_bytes)
-        if len(data) > _MAX_FILE_BYTES:
-            raise RunningHubError("文件超过大小上限")
+        if len(data) > limit:
+            raise RunningHubError(f"文件超过 {self.config.generation.max_file_mb}MB 大小上限")
         return data
+
+    async def _prepare_input_upload(self, file_type, data, source, context):
+        """Validate actual bytes; NapCat can transcode its QQ voice to MP3."""
+        limit = min(20 * 1024 * 1024 if file_type == "image" else 512 * 1024 * 1024,
+                    self.config.generation.max_file_mb * 1024 * 1024)
+        if not data or len(data) > limit:
+            raise ValueError(f"素材为空或超过 {limit // (1024 * 1024)}MB")
+        try:
+            prepared = await asyncio.to_thread(_upload_lib.prepare_upload, file_type, data)
+        except RunningHubError:
+            if file_type != "audio":
+                raise
+            bot = self.delivery.get_onebot_client(DeliveryTarget.from_dict(context))
+            if bot is None:
+                raise
+            response = await asyncio.wait_for(bot.call_action("get_record", file=source, out_format="mp3"), 15)
+            converted = await self._extract_bytes_from_napcat_result(response)
+            if not converted or len(converted) > limit:
+                raise ValueError("QQ 语音转码失败或超过文件上限，请发送 MP3/WAV/FLAC 文件")
+            prepared = await asyncio.to_thread(_upload_lib.prepare_upload, "audio", converted)
+        if len(prepared[1]) > limit:
+            raise ValueError("转换后的素材超过文件上限")
+        return prepared
 
     @staticmethod
     def _guess_filename(source: str, file_type: str, file_data: bytes | None = None) -> str:
@@ -2803,6 +2848,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
     async def _extract_bytes_from_napcat_result(self, result: Any) -> bytes | None:
         """从 NapCat get_file / get_group_file_url 返回里解析出文件字节。"""
+        limit = self.config.generation.max_file_mb * 1024 * 1024
         if isinstance(result, str):
             result = result.strip()
             if result.startswith("base64://"):
@@ -2829,7 +2875,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                     continue
                 if candidate.startswith("base64://"):
                     try:
-                        return self._decode_base64_bounded(candidate[len("base64://"):])
+                        return self._decode_base64_bounded(candidate[len("base64://"):], limit)
                     except RunningHubError:
                         raise
                     except Exception:
@@ -2837,19 +2883,19 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                 if candidate.startswith(("http://", "https://")):
                     client = self._client or self._client_cn
                     if client is not None:
-                        return await client.download_bytes(candidate)
+                        return await client.download_bytes(candidate, max_bytes=limit)
                     continue
                 path = _file_source_lib.trusted_local_file(candidate, self._trusted_file_roots())
                 if path:
-                    if path.stat().st_size > _MAX_FILE_BYTES:
+                    if path.stat().st_size > limit:
                         raise RunningHubError(
-                            f"本地文件超过 {_MAX_FILE_BYTES} 字节上限: {path}"
+                            f"本地文件超过 {limit} 字节上限: {path}"
                         )
                     return await asyncio.to_thread(path.read_bytes)
                 # 仅允许 base64/base64 字段携带无前缀编码，避免误解码文件名。
                 if field_name in {"base64", "data"}:
                     try:
-                        return self._decode_base64_bounded(candidate)
+                        return self._decode_base64_bounded(candidate, limit)
                     except RunningHubError:
                         raise
                     except Exception:
@@ -2858,20 +2904,20 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             if url.startswith(("http://", "https://")):
                 client = self._client or self._client_cn
                 if client is not None:
-                    return await client.download_bytes(url)
+                    return await client.download_bytes(url, max_bytes=limit)
             path = str(data.get("path") or data.get("file_path") or "").strip()
             if path:
                 p = _file_source_lib.trusted_local_file(path, self._trusted_file_roots())
                 if p:
-                    if p.stat().st_size > _MAX_FILE_BYTES:
-                        raise RunningHubError(f"本地文件超过 {_MAX_FILE_BYTES} 字节上限，已拒绝: {path}")
+                    if p.stat().st_size > limit:
+                        raise RunningHubError(f"本地文件超过 {limit} 字节上限，已拒绝: {path}")
                     return await asyncio.to_thread(p.read_bytes)
 
         url = result.get("url")
         if isinstance(url, str) and url.startswith(("http://", "https://")):
             client = self._client or self._client_cn
             if client is not None:
-                return await client.download_bytes(url)
+                return await client.download_bytes(url, max_bytes=limit)
 
         return None
 
@@ -3062,11 +3108,14 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         )
 
         try:
+            _detect_lib.validate_detected_prompt_nodes(detected)
+            preset = _preset_lib.match_workflow_preset(workflow_json) if not detailed else None
             await self._append_workflow_to_config(
                 workflow_name=workflow_name,
                 workflow_id=workflow_id,
                 nodes=detected,
                 region=region,
+                settings=preset["settings"] if preset else None,
             )
         except Exception as exc:
             self.logger.error("[识别] 写入插件配置失败: %s", exc, exc_info=True)
@@ -3094,6 +3143,9 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         self, workflow_json: dict[str, Any], *, stream_id: str = ""
     ) -> tuple[list[dict[str, str]], str]:
         """简化识别：LLM 优先（关键节点专用提示词），失败回退启发式。"""
+        preset = _preset_lib.match_workflow_preset(workflow_json)
+        if preset:
+            return preset["input_nodes"], f"内置预设·{preset['title']}"
         if self.config.feature.use_llm:
             llm_nodes = await self._detect_input_nodes_with_llm(
                 workflow_json,
@@ -3132,6 +3184,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         workflow_id: str,
         nodes: list[dict[str, str]],
         region: str = "overseas",
+        settings: dict[str, Any] | None = None,
     ) -> None:
         """将识别出的工作流写入 AstrBot 插件配置并热更新当前实例。"""
         workflow_dict: dict[str, Any] = {
@@ -3152,6 +3205,11 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                 for node in nodes
             ],
         }
+        workflow_dict["input_nodes"] = [InputNodeSection.model_validate({
+            **node, "label": node.get("label") or node.get("hint") or ""
+        }).model_dump() for node in nodes]
+        workflow_dict.update({k: v for k, v in (settings or {}).items()
+                              if k in {"description", "llm_enhance", "llm_template_path", "output_type", "capability", "prompt_profile", "cost_hint"}})
         WorkflowItemSection.model_validate(workflow_dict)
 
         merged = [
@@ -3246,10 +3304,10 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         description = (
             "根据用户明确的生成或修改要求运行 RunningHub 工作流，支持聊天图片、引用图片和参数。"
             f"当前可用名称：{names}。"
-            "简单生成或当前单张图片可直接调用；唯一可用工作流可省略名称。多图角色、历史素材或不确定用途时先调用 get_workflow_context。"
+            "简单生成或当前单张图片可直接调用；唯一可用工作流可省略名称。查工作流用 rh_workflows，查图片/视频/音频素材用 rh_media。"
             "用它返回的图片编号和输入 key，不得编造 URL、图片内容或参数。"
             "修改生成结果时选择对应 generated 图片；沿用原参考图和参数时使用 reuse_task_id。"
-            "缺少素材时按工具返回提示补充；尚未提交不得声称已开始。每轮只提交一次，不要轮询。"
+            "缺少素材时按工具返回提示补充；尚未提交不得声称已开始。用户明确要求的不同生成可分别提交；相同内容不要重提，不要轮询。"
         )
         try:
             tool = self.context.get_llm_tool_manager().get_func("run_workflow")
@@ -3269,6 +3327,34 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         Args:
         """
         return await self._natural_context(event)
+
+    @filter.llm_tool("rh_workflows")
+    async def handle_rh_workflows(self, event: AstrMessageEvent, workflow_name: str = "") -> str:
+        """查询可用工作流。留空只返回用途概要，指定名称才展开输入与参数；简单请求可直接 run_workflow。
+
+        Args:
+            workflow_name(string): 留空列概要；填写工作流名称查看输入详情
+        """
+        return await self._workflow_catalog_tool(event, workflow_name)
+
+    @filter.llm_tool("rh_media")
+    async def handle_rh_media(self, event: AstrMessageEvent, source: str = "all", media_type: str = "") -> str:
+        """查询当前会话用户的素材编号与简短描述；memory 只查保存图片。视频和音频不解码画面或内容。
+
+        Args:
+            source(string): all、current、reply、recent、memory、result 或 avatar
+            media_type(string): image、video、audio；留空不限类型
+        """
+        return await self._media_catalog_tool(event, source, media_type)
+
+    @filter.llm_tool("rh_inspect_media")
+    async def handle_rh_inspect_media(self, event: AstrMessageEvent, media_id: str = "") -> str:
+        """为缺少简介且确需辨认的图片补充描述；已有简介直接复用。视频和音频按用户描述选择用途。
+
+        Args:
+            media_id(string): rh_media 返回的素材编号，不能传 URL 或文件路径
+        """
+        return await self._inspect_media_tool(event, media_id)
 
     @filter.llm_tool("manage_workflow_task")
     async def handle_manage_workflow_task(self, event: AstrMessageEvent, action: str = "status",
@@ -3292,9 +3378,10 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         parameters: dict[str, Any] | None = None,
         reuse_task_id: str = "",
         output_type: str = "",
+        media_bindings: dict[str, str] | None = None,
     ) -> str:
         """按用户明确的生成/编辑要求运行工作流。简单请求可直接调用，唯一可用工作流可省略名称；多图角色或修改历史素材时先调用 get_workflow_context。
-        每轮只运行一次；根据返回值区分等待补充和已提交，不要轮询。
+        用户明确要求多个不同生成时可分别提交；相同内容只提交一次。根据返回值区分等待补充和已提交，不要轮询。
 
         Args:
             workflow_name(string): 工作流名称；唯一可用工作流或复用任务时可留空
@@ -3304,9 +3391,10 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             parameters(object): 用户明确要求修改的可编辑参数，key 为 节点ID/字段名，value 满足参数约束；固定节点不可修改
             reuse_task_id(string): 从 get_workflow_context 选择原任务 ID，继承其提示词、参数和原参考图；修改生成结果需另外指定 generated 图片
             output_type(string): 可选的成品类型 image、video、audio、file 或 auto；匹配唯一工作流时可省略名称
+            media_bindings(object): 图片、视频、音频的用途绑定，key 为 节点ID/字段名 或输入别名，value 为 rh_media 返回的素材编号
         """
         return await self._run_natural_workflow(event, workflow_name, prompt, image_refs,
-                                                image_bindings, parameters, reuse_task_id, output_type)
+                                                image_bindings, parameters, reuse_task_id, output_type, media_bindings)
 
     @staticmethod
     def _web_jsonify(payload: Any):
@@ -3648,6 +3736,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                         "effective_type": self._resolve_value_type(node),
                         "label": str(node.label or ""),
                         "required": node.required,
+                        "input_key": node.input_key,
+                        "role": node.role,
                         "param_type": node.param_type,
                         "minimum": node.minimum,
                         "maximum": node.maximum,
@@ -3665,6 +3755,9 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                     "description": workflow.description,
                     "llm_enabled": workflow.llm_enabled,
                     "output_type": workflow.output_type,
+                    "capability": workflow.capability,
+                    "cost_hint": workflow.cost_hint,
+                    "prompt_profile": workflow.prompt_profile,
                     "nodes": nodes,
                 }
             )
@@ -3749,6 +3842,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                         "value_type": value_type,
                         "label": label,
                         "required": bool(node_raw.get("required", False)),
+                        "input_key": str(node_raw.get("input_key") or ""),
+                        "role": str(node_raw.get("role") or ""),
                         "param_type": str(node_raw.get("param_type") or "string"),
                         "minimum": node_raw.get("minimum") if node_raw.get("minimum") != "" else None,
                         "maximum": node_raw.get("maximum") if node_raw.get("maximum") != "" else None,
@@ -3778,6 +3873,9 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                         "description": str(raw.get("description") or ""),
                         "llm_enabled": bool(raw.get("llm_enabled", True)),
                         "output_type": str(raw.get("output_type", "auto")),
+                        "capability": str(raw.get("capability") or "auto"),
+                        "cost_hint": str(raw.get("cost_hint") or ""),
+                        "prompt_profile": str(raw.get("prompt_profile") or "auto"),
                         "input_nodes": nodes,
                     }
                 )
@@ -3858,7 +3956,13 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             return self._web_jsonify({"success": False, "message": f"识别失败: {exc}"})
         if not detected:
             return self._web_jsonify({"success": False, "message": "未识别出输入节点，请手动添加"})
-        return self._web_jsonify({"success": True, "method": method, "nodes": detected})
+        try:
+            _detect_lib.validate_detected_prompt_nodes(detected)
+        except ValueError as exc:
+            return self._web_jsonify({"success": False, "message": str(exc)})
+        preset = _preset_lib.match_workflow_preset(workflow_json) if not detailed else None
+        return self._web_jsonify({"success": True, "method": method, "nodes": detected,
+                                  "settings": preset["settings"] if preset else {}})
 
     def _prompt_templates_dir(self) -> Path:
         """用户扩写模板目录（AstrBot 持久化目录，插件更新后不会丢失）。

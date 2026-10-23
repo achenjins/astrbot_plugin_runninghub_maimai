@@ -16,6 +16,7 @@ STATUS_LABELS = {"queued": "排队中", "submitting": "正在提交", "pending":
                  "tracking_paused": "查询已暂停", "needs_attention": "需要处理",
                  "unknown_submission": "提交未确认", "success": "生成成功", "failed": "生成失败", "cancelled": "已取消"}
 STAGE_LABELS = {"preparing_inputs": "保存参考素材", "queued": "等待运行名额", "uploading": "上传参考素材",
+                "platform_queue": "平台繁忙，等待重排",
                 "enhancing": "扩写提示词", "submitting": "提交平台", "polling": "等待平台结果",
                 "delivering": "发送结果", "finished": "结果已处理"}
 
@@ -105,7 +106,7 @@ class TaskManagementMixin:
     async def _manage_workflow_task(self, event, action="status", task_id="", selection=""):
         context = self._event_ctx(event)
         owner = MediaStore.owner(context)
-        allowed, message = self._check_access(context["user_id"], context["group_id"], check_quota=False)
+        allowed, message = self._check_access(context["user_id"], context["group_id"], check_quota=False, natural_language=True)
         try:
             if not allowed or not owner:
                 raise ValueError(message or "无法识别会话用户")

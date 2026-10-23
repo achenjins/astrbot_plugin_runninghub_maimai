@@ -43,8 +43,10 @@ class ImageAssetsMixin:
     async def _load_image_memory(self):
         try:
             if self._image_memory is None:
-                self._image_memory = ImageMemory(self._prompt_library_path().parent / "image_memory")
+                self._image_memory = ImageMemory(self._prompt_library_path().parent / "image_memory",
+                                                ttl_seconds=self.config.feature.image_memory_hours * 3600)
                 self._image_memory_limit = None
+            self._image_memory.ttl_seconds = self.config.feature.image_memory_hours * 3600
             await self._image_memory.load()
             limit = self.config.feature.recent_images
             if self._image_memory_limit != limit:
@@ -59,7 +61,11 @@ class ImageAssetsMixin:
         memory = await self._load_image_memory()
         return memory.list_images(owner, "images", self.config.feature.recent_images) if memory else []
 
-    async def _remember_image_usage(self, owner, ref, data, *, description=None):
+    async def _find_image_memory(self, owner, ref):
+        return next((item for item in await self._memory_candidates(owner)
+                     if ref == item["memory_id"] or ref in item.get("media_ids", [])), None)
+
+    async def _remember_image_usage(self, owner, ref, data, *, description=None, origin=None):
         if not owner or not data or len(data) > MAX_IMAGE_BYTES:
             return
         try:
@@ -78,8 +84,19 @@ class ImageAssetsMixin:
                         description = await self._describe_image(owner, data)
                     except Exception as exc:
                         self.logger.warning("图片简介不可用，继续使用原图: %s", exc)
-            await memory.remember(owner, "images", {"media_id": ref, "type": "image"},
-                                  data, description or "", self.config.feature.recent_images)
+            asset = {"media_id": ref, "type": "image", "origin": "reference"}
+            try:
+                original = self._get_media_store().get(owner, ref)
+                asset.update(message_id=original.get("message_id", ""), index=original.get("position", 0),
+                             origin="result" if original.get("origin") == "generated" else "reference")
+            except ValueError:
+                pass  # A stable saved reference need not still have a chat entry.
+            if ref.startswith("result:"):
+                asset["origin"] = "result"
+            if origin in {"result", "reference"}:
+                asset["origin"] = origin
+            return await memory.remember(owner, "images", asset,
+                                         data, description or "", self.config.feature.recent_images)
         except Exception as exc:
             self.logger.warning("保存最近图片失败，继续原任务: %s", exc)
 
@@ -133,9 +150,9 @@ class ImageAssetsMixin:
         return candidates
 
     async def _validate_image_ref(self, owner, ref):
+        if await self._find_image_memory(owner, ref):
+            return
         if ref.startswith("im-"):
-            if any(r["memory_id"] == ref for r in await self._memory_candidates(owner)):
-                return
             raise ValueError("最近图片编号已过期或不属于当前用户会话")
         if ref.startswith("avatar:"):
             platform, stream, user = json.loads(owner)
@@ -149,12 +166,13 @@ class ImageAssetsMixin:
 
     async def _read_special_image(self, owner, ref, client):
         await self._validate_image_ref(owner, ref)
-        if ref.startswith("im-"):
+        saved = await self._find_image_memory(owner, ref)
+        if saved is not None:
             memory = await self._load_image_memory()
-            data = await memory.read(owner, "images", ref) if memory else None
+            data = await memory.read(owner, "images", saved["memory_id"]) if memory else None
             if not data:
                 raise ValueError("原图缓存不可用，请重新发送图片")
-            await memory.touch(owner, "images", ref)
+            await memory.touch(owner, "images", saved["memory_id"])
             return data
         context = self._avatar_scopes[owner]
         target_id = context["group_id"] if ref == "avatar:group" else context["user_id"]

@@ -113,6 +113,7 @@ async def completed_task(plugin, request, urls, task_id="finished-1"):
 
 
 def test_partial_delivery_retries_only_failed_image_from_cache_after_reload(plugin):
+    plugin.config.generation.delivery_retries = 0
     image_attempts = []
 
     async def flaky_send(stream, chain):

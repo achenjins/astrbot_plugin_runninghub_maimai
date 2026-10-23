@@ -69,6 +69,12 @@ def safe_int(value: Any) -> int:
         return 0
 
 
+def validate_detected_prompt_nodes(nodes: list[dict[str, Any]]) -> None:
+    """Reject ambiguous primary prompts before an identified workflow is saved."""
+    if sum(str(node.get("value_type") or "").strip().lower() == "prompt" for node in nodes) > 1:
+        raise ValueError("识别出多个主提示词节点，未写入配置。请重新识别，或手动将唯一的主提示词设为 prompt，其余改为固定默认值或可编辑配置。")
+
+
 def detect_input_nodes(workflow_json: dict[str, Any]) -> list[dict[str, str]]:
     """从工作流 JSON 自动识别可能的输入节点（启发式，作为 LLM 识别的兜底）。
 

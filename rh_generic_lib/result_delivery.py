@@ -92,11 +92,12 @@ class ResultDeliveryMixin:
         elif self._is_video_url(url, output_type):
             receipt = await self.delivery.send_video_result(target, url, need_message_id=recall)
         else:
-            sent = await self.delivery.send_text(target, f"任务 {task_id} 结果 {index + 1}：{url}")
-            receipt = DeliveryReceipt(sent, as_link=sent)
+            text_receipt = await self.delivery.send_text_result(target, f"任务 {task_id} 结果 {index + 1}：{url}")
+            receipt = DeliveryReceipt(text_receipt.success, text_receipt.message_id,
+                                      as_link=text_receipt.success, uncertain=text_receipt.uncertain)
         if receipt.success and recall and receipt.message_id:
             self._schedule_recall(receipt.message_id, self.config.feature.recall_seconds, platform_id=target.platform_id)
-        return receipt, "" if receipt.success else "发送未成功，请检查 QQ 连接后补发"
+        return receipt, "" if receipt.success else "发送状态未知，请先确认是否收到，再决定补发" if receipt.uncertain else "发送未成功，请检查 QQ 连接后补发"
 
     async def _deliver_saved_results(self, record: dict, target: DeliveryTarget, client: Any,
                                      indices: list[int] | None = None, *, resend: bool = False, announce: bool = True):
@@ -129,10 +130,14 @@ class ResultDeliveryMixin:
                 for index in indices:
                     try:
                         receipt, error = await self._send_saved_output(record, index, target, client)
+                        retries = self.config.generation.delivery_retries
+                        while not receipt.success and not receipt.uncertain and error == "发送未成功，请检查 QQ 连接后补发" and retries > 0:
+                            retries -= 1
+                            receipt, error = await self._send_saved_output(record, index, target, client)
                     except Exception as exc:
                         self.logger.exception("结果发送异常: %s", exc)
-                        receipt, error = DeliveryReceipt(False), "发送异常"
-                    self._update_output(record, index, sent=receipt.success, error=error)
+                        receipt, error = DeliveryReceipt(False, uncertain=True), "发送状态未知，请确认收到情况后补发"
+                    self._update_output(record, index, sent=receipt.success, error=error, uncertain=receipt.uncertain)
                     if journal:
                         await journal.update(record["journal_id"], outputs=record["outputs"],
                                              delivered_indexes=[i for i, o in enumerate(record["outputs"]) if o.get("sent")])
@@ -142,7 +147,9 @@ class ResultDeliveryMixin:
                         failures.append(f"第 {index + 1} 项：{error}")
                 record["delivery_complete"] = True
                 if journal:
-                    await journal.update(record["journal_id"], delivery_status="sent" if all(o.get("sent") for o in record["outputs"]) else "partial", stage="finished")
+                    delivery_status = ("uncertain" if any(o.get("uncertain") for o in record["outputs"])
+                                       else "sent" if all(o.get("sent") for o in record["outputs"]) else "partial")
+                    await journal.update(record["journal_id"], delivery_status=delivery_status, stage="finished")
                 if record.get("saved"):
                     try:
                         self._get_media_store().update_delivery(record["owner"], record["task_id"], delivery_complete=True)

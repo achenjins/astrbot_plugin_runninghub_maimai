@@ -21,6 +21,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+from .upstream.delivery import DeliveryUncertain
 from urllib.parse import unquote, urlparse
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
@@ -89,6 +90,7 @@ class DeliveryReceipt:
     success: bool
     message_id: str = ""
     as_link: bool = False
+    uncertain: bool = False
 
 
 class BaseDeliveryChannel(ABC):
@@ -132,17 +134,19 @@ class GenericAstrBotChannel(BaseDeliveryChannel):
         self.logger = logger
 
     async def send_text(self, target: DeliveryTarget, text: str) -> bool:
+        return (await self.send_text_result(target, text)).success
+
+    async def send_text_result(self, target: DeliveryTarget, text: str) -> DeliveryReceipt:
         if not target.stream_id or not str(text or ""):
-            return False
+            return DeliveryReceipt(False)
         try:
-            return bool(
-                await self.context.send_message(
-                    target.stream_id, MessageChain().message(str(text))
-                )
+            sent = await self.context.send_message(
+                target.stream_id, MessageChain().message(str(text))
             )
+            return DeliveryReceipt(bool(sent))
         except Exception as exc:
-            self.logger.warning("通用通道发送文本失败: %s", exc)
-            return False
+            self.logger.warning("通用通道文本发送状态未知: %s", exc)
+            return DeliveryReceipt(False, uncertain=True)
 
     async def send_image(self, target: DeliveryTarget, image_base64: str) -> str:
         return (await self.send_image_result(target, image_base64)).message_id
@@ -155,7 +159,7 @@ class GenericAstrBotChannel(BaseDeliveryChannel):
             return DeliveryReceipt(bool(sent))
         except Exception as exc:
             self.logger.warning("通用通道发送图片失败: %s", exc)
-            return DeliveryReceipt(False)
+            return DeliveryReceipt(False, uncertain=True)
 
     async def send_video(self, target: DeliveryTarget, video_url: str) -> str:
         return (await self.send_video_result(target, video_url)).message_id
@@ -168,9 +172,10 @@ class GenericAstrBotChannel(BaseDeliveryChannel):
             if sent:
                 return DeliveryReceipt(True)
         except Exception as exc:
-            self.logger.warning("通用通道发送视频失败，回退发送链接: %s", exc)
+            self.logger.warning("通用通道视频发送状态未知，保留人工补发: %s", exc)
+            return DeliveryReceipt(False, uncertain=True)
         sent = await self.send_text(target, video_url)
-        return DeliveryReceipt(sent, as_link=sent)
+        return DeliveryReceipt(sent, as_link=sent, uncertain=not sent)
 
     async def send_file(
         self, target: DeliveryTarget, file_url: str, filename: str = ""
@@ -246,7 +251,9 @@ class OneBotChannel(BaseDeliveryChannel):
             response = await call_action(action, **params)
         except Exception as exc:
             self.logger.warning("OneBot 调用 %s 失败: %s", action, exc)
-            return None
+            if getattr(exc, "retcode", None) is not None or type(exc).__name__ == "ActionFailed":
+                return None
+            raise DeliveryUncertain(f"{action} 返回前连接中断，发送状态未知") from exc
         if self._is_failed(response):
             self.logger.warning("OneBot 调用 %s 业务失败: %s", action, str(response)[:200])
             return None
@@ -398,17 +405,21 @@ class Delivery:
         return self._generic
 
     async def send_text(self, target: DeliveryTarget, text: str) -> bool:
-        """发送文本。
+        return (await self.send_text_result(target, text)).success
 
-        AstrBot 通用通道是首选（支持所有已接入平台）；通用通道失败时，
-        且目标带 OneBot 群号/用户号，再尝试 OneBot 直发兜底。
-        """
-        if await self._generic.send_text(target, text):
-            return True
+    async def send_text_result(self, target: DeliveryTarget, text: str) -> DeliveryReceipt:
+        """发送文本；只有明确失败才尝试其他通道，回执未知时保留人工确认。"""
+        receipt = await self._generic.send_text_result(target, text)
+        if receipt.success or receipt.uncertain:
+            return receipt
         bot = self.get_onebot_client(target)
         if bot is not None and (target.group_id or target.user_id):
-            return await OneBotChannel(bot, self.logger).send_text(target, text)
-        return False
+            try:
+                sent = await OneBotChannel(bot, self.logger).send_text(target, text)
+                return DeliveryReceipt(sent)
+            except DeliveryUncertain:
+                return DeliveryReceipt(False, uncertain=True)
+        return receipt
 
     async def send_image(self, target: DeliveryTarget, image_base64: str, *, need_message_id: bool = False) -> str:
         return (await self.send_image_result(target, image_base64, need_message_id=need_message_id)).message_id
@@ -416,20 +427,29 @@ class Delivery:
     async def send_image_result(self, target: DeliveryTarget, image_base64: str, *, need_message_id: bool = False) -> DeliveryReceipt:
         bot = self.get_onebot_client(target)
         native = bot is not None and bool(target.group_id or target.user_id)
-        if need_message_id and native:
+        try:
+            if need_message_id and native:
+                mid, sent = await OneBotChannel(bot, self.logger).send_image_with_status(target, image_base64)
+                if sent:
+                    return DeliveryReceipt(True, mid)
+            receipt = await self._generic.send_image_result(target, image_base64)
+            if receipt.success or receipt.uncertain or not native or need_message_id:
+                return receipt
             mid, sent = await OneBotChannel(bot, self.logger).send_image_with_status(target, image_base64)
-            if sent:
-                return DeliveryReceipt(True, mid)
-        receipt = await self._generic.send_image_result(target, image_base64)
-        if receipt.success or not native or need_message_id:
-            return receipt
-        mid, sent = await OneBotChannel(bot, self.logger).send_image_with_status(target, image_base64)
-        return DeliveryReceipt(sent, mid)
+            return DeliveryReceipt(sent, mid)
+        except DeliveryUncertain:
+            return DeliveryReceipt(False, uncertain=True)
 
     async def send_video(self, target: DeliveryTarget, video_url: str, *, need_message_id: bool = False) -> str:
         return (await self.send_video_result(target, video_url, need_message_id=need_message_id)).message_id
 
     async def send_video_result(self, target: DeliveryTarget, video_url: str, *, need_message_id: bool = False) -> DeliveryReceipt:
+        try:
+            return await self._send_video_result(target, video_url, need_message_id=need_message_id)
+        except DeliveryUncertain:
+            return DeliveryReceipt(False, uncertain=True)
+
+    async def _send_video_result(self, target: DeliveryTarget, video_url: str, *, need_message_id: bool = False) -> DeliveryReceipt:
         bot = self.get_onebot_client(target)
         if bot is not None and (target.group_id or target.user_id):
             onebot = OneBotChannel(bot, self.logger)

@@ -1,0 +1,348 @@
+"""消息文件提取与字节读取（不依赖 MaiBot / AstrBot SDK）。
+
+把消息段解析、类型推断、base64 / URL / 本地路径读取集中在这里，
+插件主体只需要负责「拿到文件后往哪个会话投」。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
+import os
+import re
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+from .runninghub_client import RunningHubError
+
+# 上传/下载单个文件的最大字节数（512MB），防止异常或恶意超大内容撑爆内存
+MAX_FILE_BYTES = 512 * 1024 * 1024
+
+# 允许按本地路径读取的目录白名单：消息段里的 path/file 字段不可信，
+# 只有适配器缓存目录与系统临时目录内的普通文件才允许直读（插件 on_load 注册缓存根目录）。
+# resolve() 后做相对路径校验，符号链接越狱与 .. 逃逸一并拒绝；UNC 一律拒绝。
+TRUSTED_FILE_ROOTS: list[Path] = []
+
+
+def add_trusted_root(path: Any) -> None:
+    """登记一个可信本地目录（幂等）。适配器/缓存落盘文件只可能出现在这些树下。"""
+    try:
+        resolved = Path(str(path or "")).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return
+    if resolved and resolved not in TRUSTED_FILE_ROOTS:
+        TRUSTED_FILE_ROOTS.append(resolved)
+
+
+add_trusted_root(tempfile.gettempdir())
+
+
+def trusted_local_file(value: Any) -> Path | None:
+    """返回白名单内的可读普通文件路径，否则 None。"""
+    raw = str(value or "").strip()
+    if not raw or "\x00" in raw:
+        return None
+    if raw.lower().startswith("file://"):
+        from urllib.parse import unquote, urlparse
+        try:
+            parsed = urlparse(raw)
+        except ValueError:
+            return None
+        if parsed.netloc not in ("", "localhost"):
+            return None
+        raw = unquote(parsed.path)
+        if os.name == "nt" and re.match(r"^/[A-Za-z]:/", raw):
+            raw = raw[1:]
+    if raw.replace("/", "\\").startswith("\\\\"):
+        return None  # UNC：可能触发 SMB 凭据外发，直接拒绝
+    try:
+        resolved = Path(raw).resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    for root in TRUSTED_FILE_ROOTS:
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    return None
+
+# 交互收集会话中，用于"跳过剩余文件、直接开始运行"的触发词
+FINISH_KEYWORDS = {
+    "完成", "开始", "开始运行", "运行", "提交", "结束",
+    "跳过", "跳过剩余", "直接开始", "直接运行", "好了",
+    "ok", "go", "done", "finish", "start",
+}
+
+
+def extract_files_from_message(message: dict) -> list[tuple[str, str]]:
+    """从消息中提取文件，返回 [(类型 image/audio/video, 来源)]。
+
+    MaiBot 消息段真实格式（Host 序列化后）：
+    - 图片: {"type":"image","data":"<内容/url>","binary_data_base64":"<base64 或空>"}
+    - 语音: {"type":"voice","data":"<内容/url>","binary_data_base64":"<base64 或空>"}
+    优先用 binary_data_base64，否则回退 data（url/本地路径）。
+    """
+    raw = message.get("raw_message") or message.get("message_segments") or message.get("message") or []
+    if not isinstance(raw, list):
+        return []
+    files: list[tuple[str, str]] = []
+    for seg in raw:
+        if not isinstance(seg, dict):
+            continue
+        if seg.get("type") == "dict" and isinstance(seg.get("data"), dict):
+            seg = seg["data"]
+        seg_type = str(seg.get("type") or "")
+        data = seg.get("data")
+        if isinstance(data, dict):
+            data_text = str(data.get("url") or data.get("file") or data.get("path") or "").strip()
+        else:
+            data_text = str(data).strip() if isinstance(data, str) else ""
+        b64 = str(seg.get("binary_data_base64") or "").strip()
+        if seg_type in ("image", "emoji"):
+            source = ("base64://" + b64) if b64 else data_text
+            if source:
+                files.append(("image", source))
+        elif seg_type in ("voice", "record", "audio"):
+            source = ("base64://" + b64) if b64 else data_text
+            if source:
+                files.append(("audio", source))
+        elif seg_type == "video":
+            source = ("base64://" + b64) if b64 else data_text
+            if source:
+                files.append(("video", source))
+        elif seg_type == "file":
+            filename = ""
+            if isinstance(data, dict):
+                source = str(data.get("url") or data.get("file_url") or "").strip()
+                filename = str(
+                    data.get("name") or data.get("file_name") or data.get("filename") or data.get("file") or ""
+                ).strip()
+                if not filename:
+                    for key, val in data.items():
+                        if key in ("url", "file_url"):
+                            continue
+                        if isinstance(val, str) and detect_file_type_from_name(val) != "unknown":
+                            filename = val.strip()
+                            break
+                if not source:
+                    source = filename
+                if not filename:
+                    m = re.search(r"[?&]fname=([^&]+)", source)
+                    if m:
+                        filename = m.group(1)
+            else:
+                source = data_text
+                filename = source
+            if source:
+                file_type = detect_file_type_from_name(filename or source)
+                if file_type != "unknown":
+                    files.append((file_type, source))
+    return files
+
+
+def detect_file_type_from_name(name: str) -> str:
+    """根据文件名 / URL 扩展名推断文件类型（image / audio / video）。"""
+    path = str(name or "").split("?", 1)[0].strip().lower()
+    if path.endswith((
+        ".png", ".jpg", ".jpeg", ".jpe", ".jfif", ".webp", ".gif", ".bmp",
+        ".tif", ".tiff", ".ico", ".heic", ".heif", ".avif", ".jxl", ".svg", ".raw", ".dib",
+    )):
+        return "image"
+    if path.endswith((
+        ".mp3", ".wav", ".flac", ".aac", ".m4a", ".m4r", ".ogg", ".oga", ".opus",
+        ".wma", ".amr", ".silk", ".aiff", ".aif", ".ape", ".alac", ".wv",
+        ".mp2", ".mpga", ".ac3", ".mka", ".mid", ".midi",
+    )):
+        return "audio"
+    if path.endswith((".mp4", ".mov", ".webm", ".mkv", ".avi", ".flv", ".m4v", ".mpeg", ".mpg", ".3gp", ".wmv")):
+        return "video"
+    return "unknown"
+
+
+def extract_text_from_message(message: dict) -> str:
+    """从消息中提取纯文本内容。"""
+    raw = message.get("raw_message") or message.get("message_segments") or message.get("message") or []
+    if not isinstance(raw, list):
+        return ""
+    parts: list[str] = []
+    for seg in raw:
+        if not isinstance(seg, dict):
+            continue
+        if str(seg.get("type") or "") != "text":
+            continue
+        data = seg.get("data")
+        if isinstance(data, str):
+            parts.append(data)
+        elif isinstance(data, dict) and isinstance(data.get("text"), str):
+            parts.append(data["text"])
+    return "".join(parts).strip()
+
+
+def is_finish_signal(text: str) -> bool:
+    """判断文本是否为"跳过剩余文件、直接开始运行"的触发词。"""
+    strip_chars = "/「」『』【】()（）[]\"'，。！!?？：: "
+    normalized = str(text or "").strip().strip(strip_chars).lower()
+    if not normalized:
+        return False
+    if normalized in FINISH_KEYWORDS:
+        return True
+    return normalized.startswith("跳过") or normalized.startswith("开始运行")
+
+
+async def fetch_file_bytes(source: str, client: Any) -> bytes:
+    """从 base64 数据、URL 或本地路径获取文件字节（带大小上限）。"""
+    if source.startswith("base64://"):
+        encoded = source[len("base64://"):]
+        return decode_base64_bounded(encoded, getattr(client, "max_file_bytes", MAX_FILE_BYTES))
+    if source.startswith(("http://", "https://")):
+        if client is None:
+            raise RunningHubError("客户端未初始化")
+        return await client.download_bytes(source)
+    path = trusted_local_file(source)
+    if path is not None:
+        limit = getattr(client, "max_file_bytes", MAX_FILE_BYTES)
+        if path.stat().st_size > limit:
+            raise RunningHubError(f"文件超过 {limit} 字节上限，已拒绝")
+        return await asyncio.to_thread(path.read_bytes)
+    raise RunningHubError("无法读取文件：本地路径仅限适配器缓存/系统临时目录，其他内容请通过 URL 或重发消息提供")
+
+
+# RunningHub 文件上传支持的格式（官方文档「文件上传」）：
+# 图片 JPG/PNG/JPEG/WEBP，音频 MP3/WAV/FLAC，视频 MP4/AVI/MOV/MKV。
+_UNSUPPORTED_UPLOAD = {
+    "image": "图片只支持 JPG/PNG/WEBP；GIF 动图或表情在安装 Pillow 后会自动取第一帧转成 PNG，否则请先转成 PNG/JPG 再发",
+    "audio": "音频只支持 MP3/WAV/FLAC，QQ 语音请改发 MP3 等音频文件",
+    "video": "视频只支持 MP4/AVI/MOV/MKV",
+}
+
+
+def _upload_extension(file_type: str, data: bytes) -> str:
+    if file_type == "image":
+        if data[:3] == b"\xff\xd8\xff":
+            return ".jpg"
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return ".png"
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return ".webp"
+    elif file_type == "audio":
+        if data[:3] == b"ID3" or (data[:1] == b"\xff" and len(data) > 1 and data[1] & 0xE6 == 0xE2):
+            return ".mp3"
+        if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+            return ".wav"
+        if data[:4] == b"fLaC":
+            return ".flac"
+    elif file_type == "video":
+        if data[4:8] == b"ftyp":
+            return ".mov" if data[8:12] == b"qt  " else ".mp4"
+        if data[:4] == b"RIFF" and data[8:12] == b"AVI ":
+            return ".avi"
+        if data[:4] == b"\x1a\x45\xdf\xa3":
+            return ".mkv"
+    return ""
+
+
+def upload_filename(file_type: str, data: bytes) -> str:
+    """按文件内容生成上传文件名；不在平台支持列表内的格式直接拒绝，不提交付费任务。"""
+    ext = _upload_extension(file_type, data)
+    if not ext:
+        raise RunningHubError(f"文件格式不受 RunningHub 支持：{_UNSUPPORTED_UPLOAD.get(file_type, '请换成常见图片、音频或视频格式')}")
+    return f"input_{file_type}_{int(time.time())}{ext}"
+
+
+def _image_to_png(data: bytes) -> bytes | None:
+    """平台不收的图片（GIF 表情、BMP 等）取第一帧转成 PNG；没装 Pillow 或解码失败返回 None。"""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.seek(0)
+            output = io.BytesIO()
+            image.convert("RGBA").save(output, format="PNG")
+            return output.getvalue()
+    except Exception:
+        return None
+
+
+def prepare_upload(file_type: str, data: bytes) -> tuple[str, bytes]:
+    """返回 (上传文件名, 上传内容)：QQ 表情多为 GIF，能转换时先转成 PNG，避免任务排队后才失败。"""
+    if file_type == "image" and not _upload_extension(file_type, data):
+        converted = _image_to_png(data)
+        if converted:
+            data = converted
+    return upload_filename(file_type, data), data
+
+
+def decode_base64_bounded(encoded: str, max_bytes: int = MAX_FILE_BYTES) -> bytes:
+    """解码 base64 并强制大小上限。"""
+    encoded = str(encoded or "").strip()
+    if not encoded:
+        return b""
+    if len(encoded) > max_bytes * 4 // 3 + 4:
+        raise RunningHubError(f"base64 内容超过 {max_bytes} 字节上限，已拒绝")
+    data = base64.b64decode(encoded, validate=True)
+    if len(data) > max_bytes:
+        raise RunningHubError(f"base64 解码后超过 {max_bytes} 字节上限，已拒绝")
+    return data
+
+
+async def extract_bytes_from_napcat_result(result: Any, client: Any) -> bytes | None:
+    """从 NapCat get_file / get_group_file_url 返回里解析出文件字节。"""
+    if isinstance(result, str):
+        result = result.strip()
+        if result.startswith("base64://"):
+            return decode_base64_bounded(result[len("base64://"):], getattr(client, "max_file_bytes", MAX_FILE_BYTES))
+        if result.startswith(("http://", "https://")):
+            if client is not None:
+                return await client.download_bytes(result)
+        return None
+
+    if not isinstance(result, dict):
+        return None
+
+    if result.get("success") is False:
+        return None
+    if isinstance(result.get("result"), dict):
+        return await extract_bytes_from_napcat_result(result["result"], client)
+
+    data = result.get("data")
+    if isinstance(data, dict):
+        raw_file = str(data.get("file") or "").strip()
+        b64 = str(data.get("base64") or data.get("binary_data_base64") or "").strip()
+        if raw_file.startswith("base64://"):
+            b64 = raw_file
+        if b64.startswith("base64://"):
+            b64 = b64[len("base64://"):]
+        if b64:
+            try:
+                return decode_base64_bounded(b64, getattr(client, "max_file_bytes", MAX_FILE_BYTES))
+            except RunningHubError:
+                raise
+            except Exception:
+                pass
+        url = str(data.get("url") or data.get("file_url") or data.get("download_url") or (raw_file if raw_file.startswith(("http://", "https://")) else "")).strip()
+        if url.startswith(("http://", "https://")):
+            if client is not None:
+                return await client.download_bytes(url)
+        path = str(data.get("path") or data.get("file_path") or (raw_file if not raw_file.startswith(("base64://", "http://", "https://")) else "")).strip()
+        if path:
+            p = trusted_local_file(path)
+            if p is not None:
+                limit = getattr(client, "max_file_bytes", MAX_FILE_BYTES)
+                if p.stat().st_size > limit:
+                    raise RunningHubError(f"本地文件超过 {limit} 字节上限，已拒绝")
+                return await asyncio.to_thread(p.read_bytes)
+
+    url = result.get("url")
+    if isinstance(url, str) and url.startswith(("http://", "https://")):
+        if client is not None:
+            return await client.download_bytes(url)
+
+    return None

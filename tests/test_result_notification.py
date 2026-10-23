@@ -180,6 +180,7 @@ def test_model_failure_keeps_result_history_and_falls_back_once(bot):
 
 
 def test_partial_delivery_is_told_to_model_before_reply(bot):
+    bot.plugin.config.generation.delivery_retries = 0
     original_send = bot.plugin.context.send_message
     images = []
 
@@ -236,7 +237,7 @@ def test_collecting_inputs_keeps_original_conversation_for_completion(bot, monke
             captured.append(kwargs["result_context"])
         monkeypatch.setattr(bot.plugin, "_poll_and_send", poll)
         await bot.plugin.handle_input_collector(event(images=1, mid="2"))
-        await asyncio.sleep(0)
+        await finish_jobs(bot.plugin)
         assert captured == [{"conversation_id": "original"}]
     asyncio.run(run())
 

@@ -5,6 +5,8 @@ from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Any
 
+from .upstream.media_plan import short_choice
+
 
 def node_key(node: Any) -> str:
     return f"{node.node_id}/{node.field_name}"
@@ -55,10 +57,38 @@ def parameter_value(node: Any, value: Any) -> str:
             raise ValueError(f"参数「{label}」需要 true 或 false")
         text = "true" if text.lower() in {"true", "1"} else "false"
     if node.choices and text not in node.choices:
-        raise ValueError(f"参数「{label}」可选：{'、'.join(node.choices)}")
+        normalized = text.replace("：", ":").casefold()
+        matches = [str(choice) for choice in node.choices if normalized in (
+            str(choice).replace("：", ":").casefold(),
+            short_choice(choice).replace("：", ":").casefold(),
+        )]
+        if len(matches) != 1:
+            raise ValueError(f"参数「{label}」可选：{'、'.join(node.choices)}")
+        text = matches[0]
     if node.required and not text:
         raise ValueError(f"参数「{label}」不能为空")
     return text
+
+
+def command_parameter_value(node: Any, value: Any) -> str:
+    """Accept a one-based choice number only for editable command parameters."""
+    if resolve_value_type(node) != "text":
+        raise ValueError(f"节点「{node.label or node_key(node)}」不是可编辑配置")
+    text = str(value).strip() if value is not None else ""
+    choices = list(getattr(node, "choices", []) or [])
+    if choices and text not in choices and text.isdecimal():
+        number = int(text)
+        if not 1 <= number <= len(choices):
+            raise ValueError(f"参数「{node.label or node_key(node)}」请回复选项序号 1～{len(choices)}")
+        value = choices[number - 1]
+    return parameter_value(node, value)
+
+
+def format_parameter_choices(node: Any) -> list[str]:
+    """Return numbered option lines for an editable parameter's command prompt."""
+    if resolve_value_type(node) != "text":
+        return []
+    return [f"{index}) {choice}" for index, choice in enumerate(getattr(node, "choices", []) or [], 1)]
 
 
 
@@ -94,6 +124,8 @@ def validate_node(node: Any) -> str:
 def workflow_errors(workflow: Any) -> list[dict[str, Any]]:
     errors = []
     seen = set()
+    aliases = set()
+    keys = {node_key(node) for node in workflow.input_nodes}
     prompt_count = 0
     for index, node in enumerate(workflow.input_nodes):
         key = node_key(node)
@@ -107,6 +139,11 @@ def workflow_errors(workflow: Any) -> list[dict[str, Any]]:
             if prompt_count > 1:
                 message = "最多只能有一个主提示词节点"
         seen.add(key)
+        alias = str(getattr(node, "input_key", "") or "").strip()
+        if alias and (alias in aliases or alias in keys and alias != key):
+            message = message or "输入别名重复或与其他节点编号冲突"
+        if alias:
+            aliases.add(alias)
         message = message or validate_node(node)
         if message:
             errors.append({"node_index": index, "key": key,

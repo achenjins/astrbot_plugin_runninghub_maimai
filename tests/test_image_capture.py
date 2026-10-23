@@ -98,6 +98,7 @@ def test_partial_quote_fallback_keeps_known_images_in_their_original_positions(p
 
 @pytest.mark.parametrize("raw", [
     {"group_id": 999, "message": [{"type": "image", "data": {"url": "https://example.test/foreign.png"}}]},
+    {"sender": {"user_id": "10001"}, "message": [{"type": "image", "data": {"url": "https://example.test/private.png"}}]},
     {"status": "failed", "retcode": 1, "message": "not found"},
     {"data": {}},
 ])
@@ -108,5 +109,20 @@ def test_unusable_quote_lookup_is_not_registered(plugin, raw):
 
     async def run():
         result = await plugin._remember_event_images(event(messages=[Reply(id="88", chain=[])]))
+        assert not result["reply"]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("raw", [
+    {"group_id": 20001, "sender": {"user_id": "10001"}},
+    {"sender": {"user_id": "other"}},
+])
+def test_private_quote_fallback_rejects_group_and_foreign_private_images(plugin, raw):
+    async def action(*args, **kwargs):
+        return {**raw, "message": [{"type": "image", "data": {"url": "https://example.test/foreign.png"}}]}
+    onebot(plugin, action)
+
+    async def run():
+        result = await plugin._remember_event_images(event(group="", messages=[Reply(id="88", chain=[])]))
         assert not result["reply"]
     asyncio.run(run())

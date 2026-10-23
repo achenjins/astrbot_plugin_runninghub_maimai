@@ -20,6 +20,8 @@ from .test_plugin import FakeContext, FakeEvent
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"test image"
+# Real durable writes can exceed five seconds on shared Windows CI disks.
+JOB_TIMEOUT = 30
 
 
 def event(text="", *, images=0, user="10001", group="20001", mid="1", messages=None):
@@ -73,7 +75,7 @@ def plugin(tmp_path, monkeypatch):
 
 async def finish_jobs(plugin):
     if plugin._pending:
-        await asyncio.wait_for(asyncio.gather(*list(plugin._pending.values())), 5)
+        await asyncio.wait_for(asyncio.gather(*list(plugin._pending.values())), JOB_TIMEOUT)
 
 
 async def with_jobs(coro, plugin):
@@ -91,15 +93,19 @@ def test_actual_astrbot_tool_schemas():
     assert props["image_refs"]["type"] == "array"
     assert props["image_refs"]["items"]["type"] == "string"
     assert props["image_bindings"]["type"] == "object"
+    assert props["media_bindings"]["type"] == "object"
     assert props["parameters"]["type"] == "object"
     assert llm_tools.get_func("get_workflow_context") is not None
+    assert llm_tools.get_func("rh_workflows") is not None
+    assert llm_tools.get_func("rh_media") is not None
+    assert llm_tools.get_func("rh_inspect_media") is not None
 
 
 def test_current_image_and_parameters_submit_once_without_changing_config(plugin):
     async def run():
         request = event("把这张图改成水彩，宽度1024", images=1)
         reply = await plugin.handle_run_workflow(request, "改图", "改成水彩", parameters={"宽度": 1024})
-        duplicate = await plugin.handle_run_workflow(request, "改图", "再调用一次")
+        duplicate = await plugin.handle_run_workflow(request, "改图", "改成水彩", parameters={"width": 1024})
         assert json.loads(reply)["task_id"] == json.loads(duplicate)["task_id"]
         assert json.loads(reply)["task_id"].startswith("rh-")
     asyncio.run(with_jobs(run(), plugin))
