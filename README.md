@@ -8,7 +8,7 @@
 [![Pages](https://img.shields.io/badge/Pages-4.24.2%2B-2ea44f)](#pages-可视化管理)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#许可证)
 
-![running](https://count.getloli.com/get/@rh-dshaajinse?theme=asoul)
+![running](https://count.getloli.com/get/@rh-dshaajinse?theme=asoul&darkmode=0)
 
 </div>
 
