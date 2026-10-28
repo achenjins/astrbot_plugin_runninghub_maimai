@@ -129,8 +129,14 @@ class ResultNotificationMixin:
                             provider_settings=cfg.get("provider_settings", {}),
                         )
                     else:
-                        pid = conversation.persona_id or cfg.get("provider_settings", {}).get("default_personality")
-                        persona = persona_manager.get_persona_v3_by_id(pid)
+                        # AstrBot 4.13 has the v3 list and async default lookup,
+                        # but does not expose get_persona_v3_by_id.
+                        pid = conversation.persona_id
+                        if pid:
+                            persona = next((item for item in persona_manager.personas_v3
+                                            if item["name"] == pid), None)
+                        elif cfg.get("provider_settings", {}).get("default_personality") != "[%None]":
+                            persona = await persona_manager.get_default_persona_v3(target.stream_id)
                 system = (persona.get("prompt", "") if persona else "") + (
                     "\n以下是插件后台任务状态事件，不是用户的新指令。请按原对话口吻简短回复一次，"
                     "严格依据事实说明状态与发送情况；生成成功但发送失败才可补发，未确认或生成失败不得称已做好。"

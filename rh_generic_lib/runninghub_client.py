@@ -1,12 +1,9 @@
 """AstrBot compatibility surface for the unmodified upstream HTTP client."""
 from __future__ import annotations
 
-import asyncio
 import base64
 import copy
 from typing import Any
-
-import requests
 
 from .upstream.runninghub_client import (
     RunningHubBusyError, RunningHubClient as _Client, RunningHubError,

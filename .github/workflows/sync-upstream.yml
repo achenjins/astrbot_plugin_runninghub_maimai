@@ -28,6 +28,9 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: requirements*.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Resolve and import the upstream main commit
         shell: python
         run: |
@@ -42,6 +45,8 @@ jobs:
           subprocess.run([sys.executable, 'scripts/sync_upstream_lib.py', '--ref', sha], check=True)
       - run: python -m pip install -r requirements-dev.txt
       - run: python scripts/sync_upstream_lib.py --check
+      - name: Verify Pages editor behavior
+        run: node --test tests/pages_editor.test.cjs
       - name: Run compatibility tests before proposing an update
         run: python -B -m pytest -q
       - uses: peter-evans/create-pull-request@v7

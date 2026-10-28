@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import codecs
-import hashlib
 import importlib
 import json
 import re
@@ -78,9 +77,7 @@ GenericConfig = _config_lib.GenericConfig
 InputNodeSection = _config_lib.InputNodeSection
 WorkflowItemSection = _config_lib.WorkflowItemSection
 build_config_model = _config_lib.build_config_model
-build_workflow_items = _config_lib.build_workflow_items
 dump_config_dict = _config_lib.dump_config_dict
-dump_workflow_items = _config_lib.dump_workflow_items
 
 _delivery_lib = _load_local_module("delivery")
 Delivery = _delivery_lib.Delivery
@@ -170,9 +167,9 @@ class InputSession:
     editable_nodes: list[dict[str, str]] = field(default_factory=list)
     # 触发时的会话上下文（group_id/user_id），提交后用于 NapCat 直发与自动撤回
     chat_info: dict[str, str] = field(default_factory=dict)
-    # 已接收文件的 SHA-256，用于过滤 QQ 群文件 notice + 普通消息的重复投递
+    # 按消息位置 / OneBot 文件 ID 防重；相同内容可以填充多个输入槽。
     received_labels: list[str] = field(default_factory=list)
-    received_hashes: set[str] = field(default_factory=set)
+    received_sources: set[tuple[str, ...]] = field(default_factory=set)
     execution_context: dict[str, Any] = field(default_factory=dict)
     consume_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -238,6 +235,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         self._task_action_locks = weakref.WeakValueDictionary()
         self._page_task_actions = set()
         self._page_action_workers = set()
+        self._stopping = False
+        self._lifecycle_generation = 0
 
     def _trusted_file_roots(self) -> list[Path]:
         return [Path(get_astrbot_data_path()) / "temp", self._prompt_library_path().parent]
@@ -267,16 +266,6 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
     # ── AstrBot 配置归一化 / 落盘 ────────────────────────────────
 
-    @staticmethod
-    def _normalise_workflow_items(raw_workflows: Any) -> list[dict[str, Any]]:
-        """兼容别名：真实实现位于 rh_generic_lib.config。"""
-        return build_workflow_items(raw_workflows)
-
-    @staticmethod
-    def _dump_workflow_items(items: list[WorkflowItemSection]) -> list[dict[str, Any]]:
-        """兼容别名：真实实现位于 rh_generic_lib.config。"""
-        return dump_workflow_items(items)
-
     def _dump_config_dict(self) -> dict[str, Any]:
         """生成与 _conf_schema.json 对齐的完整配置字典。"""
         return dump_config_dict(self.config)
@@ -304,12 +293,6 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         if chat_info:
             target_data.update(chat_info)
         return await self.delivery.send_text(DeliveryTarget.from_dict(target_data), text)
-
-    async def _send_image(self, stream_id: str, image_base64: str) -> str:
-        """发送图片，返回 message_id（通用平台为 ''）。"""
-        return await self.delivery.send_image(
-            DeliveryTarget.from_stream_id(stream_id), image_base64
-        )
 
     async def _resolve_provider_id(self, stream_id: str, preferred: str) -> str:
         preferred = str(preferred or "").strip()
@@ -461,8 +444,13 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
     async def initialize(self) -> None:
         """插件激活时调用（对应 maibot 的 on_load）。"""
+        self._lifecycle_generation += 1
+        self._stopping = False
+        generation = self._lifecycle_generation
         self._import_legacy_config_if_needed()
         await self._reload_from_context_config()
+        if not self._runtime_running(generation):
+            return
         self._migrate_embedded_nodes_to_workflow_nodes()
         self._load_task_history()
         self._load_prompt_library()
@@ -479,7 +467,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             await self._resume_pending_tasks()
         except (OSError, ValueError) as exc:
             self.logger.error("任务日志无法加载，暂停创建付费任务: %s", exc)
-
+        if not self._runtime_running(generation):
+            return
 
         if not cfg.server.api_key and not cfg.server.api_key_cn:
             self.logger.warning("未配置 RunningHub API Key，请在 AstrBot 插件配置中填写 server.api_key")
@@ -561,6 +550,15 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
     async def terminate(self) -> None:
         """插件停用 / 重载时调用（对应 maibot 的 on_unload）。"""
+        # AstrBot 4.x 会保留注册过的 bound Web API handler。先关闭入口，
+        # 使旧 handler 和正在等待 I/O 的请求都不能在停用后创建任务。
+        self._stopping = True
+        self._lifecycle_generation += 1
+        # The SDK exposes this registry (but no unregister API). Remove only
+        # this instance's entries: a replacement instance may already own them.
+        registered = getattr(self.context, "registered_web_apis", None)
+        if isinstance(registered, list):
+            registered[:] = [api for api in registered if getattr(api[1], "__self__", None) is not self]
         cleanup_task = self._cleanup_task
         self._cleanup_task = None
 
@@ -583,6 +581,11 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             task.cancel()
         if tasks_to_stop:
             await asyncio.gather(*tasks_to_stop, return_exceptions=True)
+        # Reservations only perform local persistence while holding this lock.
+        # Let any in-flight write observe _stopping and cancel its queued record
+        # before a replacement instance is allowed to recover the journal.
+        async with self._request_lock:
+            pass
 
         self._pending.clear()
         self._page_action_workers.clear()
@@ -672,6 +675,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
     # ── 内部工具方法 ──────────────────────────────────────────────
 
     def _rebuild_client(self) -> None:
+        if not self._runtime_running():
+            return
         previous_clients = (self._client, self._client_cn)
         cfg = self.config
         kwargs = {
@@ -738,13 +743,6 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                 return False, "你本小时的生成次数已达上限，请稍后再试"
 
         return True, ""
-
-    def _check_access_from_kwargs(self, kwargs: dict[str, Any]) -> tuple[bool, str]:
-        """从命令 kwargs 提取 user_id/group_id 并做访问控制检查。"""
-        chat_info = self._extract_chat_info(kwargs)
-        group_id = str(chat_info.get("group_id") or "")
-        user_id = str(kwargs.get("user_id") or chat_info.get("user_id") or "")
-        return self._check_access(user_id, group_id)
 
     def _is_admin(self, user_id: str) -> bool:
         """判断用户是否为管理员（可中断所有人的任务）。"""
@@ -1016,6 +1014,10 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         **kwargs: Any,
     ) -> dict[str, Any]:
         """查找工作流，构建节点参数，提交任务或进入交互式收集。"""
+        generation = self._lifecycle_generation
+        if not self._runtime_running(generation):
+            return {"success": False, "message": "插件已停用，请等待重新启用后再运行"}
+        kwargs["_lifecycle_generation"] = generation
         stream_id = str(kwargs.pop("stream_id", "") or "")
         command_text = str(command_text or "").strip()
         reused_prompt = str(kwargs.pop("reused_prompt", "") or "").strip()
@@ -1120,6 +1122,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
         if "result_context" not in kwargs:
             kwargs["result_context"] = await self._capture_result_context(stream_id)
+        if not self._runtime_running(generation):
+            return {"success": False, "message": "插件已停用，本次请求未提交"}
 
         if missing_prompt_text:
             # 有文件先收文件（收完再问描述）；没有文件则直接进入描述输入阶段
@@ -1416,7 +1420,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             return False
         key = self._session_key(session.user_id, session.stream_id)
 
-        files = await self._extract_files_from_event(event)
+        files = await self._extract_files_from_event(event, include_identity=True)
         if not files:
             await self._send_text(
                 stream_id,
@@ -1426,6 +1430,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
         region = str(session.workflow.region or "overseas").strip()
         client = self._get_client(region)
+        if not self._runtime_running() or self._input_sessions.get(key) is not session:
+            return True
         if client is None:
             self._rebuild_client()
             client = self._get_client(region)
@@ -1440,21 +1446,23 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         self,
         session: InputSession,
         key: str,
-        files: list[tuple[str, str]],
+        files: list[tuple[str, str, tuple[str, ...] | None]],
         stream_id: str,
         client: RunningHubClient,
     ) -> bool:
         """把 files 列表按类型分配到等待节点并上传，返回是否已消费。
 
         QQ 群文件会同时以 notice(group_upload) 和普通 file 消息到达，
-        这里按内容 SHA-256 去重，并且只在本次调用确实消费了新文件时才
+        这里按来源消息位置 / OneBot 文件 ID 去重，并且只在本次调用确实消费了新文件时才
         发送「已收到，还剩余…」汇总，避免连发两条。
         """
         async with session.consume_lock:
-            if self._input_sessions.get(key) is not session:
+            if not self._runtime_running() or self._input_sessions.get(key) is not session:
                 return True
             consumed_any = False
-            for file_type, source in files:
+            for file_type, source, identity in files:
+                if identity is not None and identity in session.received_sources:
+                    continue
                 index = next(
                     (i for i, n in enumerate(session.waiting_nodes) if n["value_type"] == file_type),
                     None,
@@ -1468,27 +1476,25 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                     self.logger.error("读取待上传文件失败: %s", exc)
                     await self._send_text(stream_id, f"「{session.waiting_nodes[index]['label']}」读取失败，请重新发送该文件；其他已收文件保留。")
                     continue
-                if self._input_sessions.get(key) is not session:
+                if not self._runtime_running() or self._input_sessions.get(key) is not session:
                     return True
-                digest = hashlib.sha256(file_data).hexdigest()
-                if digest in session.received_hashes:
-                    # notice 和普通消息投递的同一个文件，只处理一次
-                    continue
-                session.received_hashes.add(digest)
 
                 node = session.waiting_nodes.pop(index)
                 try:
                     filename, file_data = await self._prepare_input_upload(file_type, file_data, source,
                         {**session.chat_info, "stream_id": session.stream_id, "user_id": session.user_id})
+                    if not self._runtime_running() or self._input_sessions.get(key) is not session:
+                        return True
                     file_name = await client.upload_file(file_data, filename)
                 except Exception as exc:
-                    session.received_hashes.discard(digest)
                     session.waiting_nodes.insert(index, node)
                     self.logger.error("上传文件到 RunningHub 失败: %s", exc)
                     await self._send_text(stream_id, f"「{node['label']}」上传失败，请重新发送该文件；其他已收文件保留。")
                     continue
-                if self._input_sessions.get(key) is not session:
+                if not self._runtime_running() or self._input_sessions.get(key) is not session:
                     return True
+                if identity is not None:
+                    session.received_sources.add(identity)
                 consumed_any = True
                 session.received_labels.append(node["label"])
                 session.collected.append(
@@ -2138,9 +2144,6 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         await self._send_text(stream_id, result["message"])
         return True
 
-    def _build_waiting_tips_from_dicts(self, waiting: list[dict[str, str]]) -> str:
-        return self._format_waiting_summary(waiting)
-
     def _event_has_qq_group_file_component(self, event: AstrMessageEvent) -> bool:
         """判断消息里是否有 QQ 群文件直链组件（其真实内容由 notice 提供）。"""
         for comp in event.get_messages():
@@ -2153,24 +2156,33 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                     return True
         return False
 
-    async def _extract_files_from_event(self, event: AstrMessageEvent) -> list[tuple[str, str]]:
+    async def _extract_files_from_event(self, event: AstrMessageEvent, *, include_identity: bool = False) -> list[tuple]:
         """从 AstrBot 消息事件提取文件，返回 [(类型 image/audio/video, 来源)]。
 
         图片/语音优先取 base64，其次 URL / 本地路径；文件消息按文件名推断类型。
         """
-        files: list[tuple[str, str]] = []
-        for comp in event.get_messages():
+        files: list[tuple] = []
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        segments = raw.get("message", []) if isinstance(raw, dict) else []
+        raw_files = [segment["data"] for segment in segments if isinstance(segment, dict)
+                     and segment.get("type") == "file" and isinstance(segment.get("data"), dict)] if isinstance(segments, list) else []
+        context = self._event_ctx(event)
+        for position, comp in enumerate(event.get_messages()):
             try:
                 if isinstance(comp, (ImageComponent, RecordComponent, VideoComponent, FileComponent)):
+                    identity = (("message", context["anchor_id"], str(position)) if context["anchor_id"] else None)
+                    file_info = None
+                    if isinstance(comp, FileComponent):
+                        match = next((i for i, data in enumerate(raw_files) if data.get("name") == comp.name), None)
+                        if match is not None:
+                            file_info = raw_files.pop(match)
+                            file_id = str(file_info.get("file_id") or file_info.get("id") or "").strip()
+                            if file_id:
+                                identity = ("file", context["group_id"], context["user_id"], file_id)
                     source = self._image_source(getattr(comp, "file", ""), getattr(comp, "url", ""))
                     if isinstance(comp, FileComponent) and (not source or "ftn.qq.com" in source):
-                        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
-                        segments = raw.get("message", []) if isinstance(raw, dict) else []
-                        for segment in segments if isinstance(segments, list) else []:
-                            data = segment.get("data") if isinstance(segment, dict) and segment.get("type") == "file" else None
-                            if isinstance(data, dict) and data.get("name") == comp.name:
-                                source = await self._group_file_source(data.get("file_id") or data.get("id"), self._event_ctx(event))
-                                break
+                        if file_info is not None:
+                            source = await self._group_file_source(file_info.get("file_id") or file_info.get("id"), context)
                         if "ftn.qq.com" in source:
                             source = ""
                     if not source:
@@ -2180,7 +2192,7 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                             "video" if isinstance(comp, VideoComponent) else
                             self._detect_file_type_from_name(str(comp.name or source)))
                     if kind != "unknown":
-                        files.append((kind, source))
+                        files.append((kind, source, identity) if include_identity else (kind, source))
             except Exception as exc:
                 self.logger.warning("解析消息中的文件失败: %s", exc)
         return files
@@ -2350,42 +2362,10 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             "platform_id": platform_id,
         }
 
-    async def _send_image_with_id(
-        self,
-        image_base64: str,
-        stream_id: str,
-        *,
-        chat_info: dict,
-        need_message_id: bool = False,
-    ) -> str:
-        """发送图片；仅 need_message_id=True 时走 OneBot 直发拿 message_id。"""
-        target_data: dict[str, Any] = {"stream_id": stream_id}
-        target_data.update(chat_info or {})
-        return await self.delivery.send_image(
-            DeliveryTarget.from_dict(target_data),
-            image_base64,
-            need_message_id=need_message_id,
-        )
-
-    async def _send_video_with_id(
-        self,
-        video_url: str,
-        stream_id: str,
-        *,
-        chat_info: dict,
-        need_message_id: bool = False,
-    ) -> str:
-        """发送视频；仅 need_message_id=True 时走 OneBot 直发拿 message_id。"""
-        target_data: dict[str, Any] = {"stream_id": stream_id}
-        target_data.update(chat_info or {})
-        return await self.delivery.send_video(
-            DeliveryTarget.from_dict(target_data),
-            video_url,
-            need_message_id=need_message_id,
-        )
-
     def _schedule_recall(self, message_id: str, delay_seconds: int, *, platform_id: str = "") -> None:
         """调度一个延时撤回任务，并保存引用防止被回收。"""
+        if not self._runtime_running():
+            return
         task = asyncio.create_task(
             self._delayed_recall(message_id, delay_seconds, platform_id=platform_id)
         )
@@ -2432,6 +2412,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
     async def handle_input_collector(self, event: AstrMessageEvent) -> None:
         """拦截交互式输入会话中的文件 / 控制词消息，阻止其继续进入 LLM。"""
+        if not self._runtime_running():
+            return
         # QQ 群文件会先产生 notice，再产生一条空的 file 消息；放行 notice，
         # 由后面的 handle_notice_collector 通过 OneBot API 下载真实文件。
         if self._is_napcat_group_upload_notice(event):
@@ -2729,6 +2711,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9998)
     async def handle_notice_collector(self, event: AstrMessageEvent) -> None:
         """处理 OneBot notice 事件中的 QQ 群文件上传。"""
+        if not self._runtime_running():
+            return
         raw = getattr(event.message_obj, "raw_message", None)
         if not isinstance(raw, dict):
             return
@@ -2810,7 +2794,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         import base64 as _b64
 
         source = "base64://" + _b64.b64encode(file_data).decode("ascii")
-        consumed = await self._consume_files(session, key, [(file_type, source)], stream_id, client)
+        identity = ("file", group_id, user_id, file_id)
+        consumed = await self._consume_files(session, key, [(file_type, source, identity)], stream_id, client)
         if consumed:
             self._mark_handled(event)
 
@@ -3157,13 +3142,21 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
         return detect_key_nodes(workflow_json), "简化"
 
     async def _persist_workflow_items(
-        self, items: list[WorkflowItemSection]
+        self, items: list[WorkflowItemSection], *, append: bool = False
     ) -> dict[str, Any]:
         """把工作流列表写入 AstrBot 配置并热更新当前实例（识别 / 可视化页面共用）。"""
-        errors = [error["message"] for item in items for error in _validation_lib.workflow_errors(item)]
-        if errors:
-            raise ValueError("\n".join(errors))
         async with self._config_write_lock:
+            if append:
+                items = [*self.config.workflows.items, *items]
+            names: set[str] = set()
+            for item in items:
+                name = item.name.strip()
+                if name in names:
+                    raise ValueError(f"已存在同名工作流「{name}」，请换一个名称重试")
+                names.add(name)
+            errors = [error["message"] for item in items for error in _validation_lib.workflow_errors(item)]
+            if errors:
+                raise ValueError("\n".join(errors))
             temp = self.config.model_copy(deep=True)
             temp.workflows.items = [
                 WorkflowItemSection.model_validate(item) for item in items
@@ -3195,30 +3188,16 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
             "llm_enhance": False,
             "llm_template_path": "",
             "input_nodes": [
-                {
-                    "node_id": str(node.get("node_id") or ""),
-                    "field_name": str(node.get("field_name") or ""),
-                    "field_value": str(node.get("field_value") or ""),
-                    "value_type": str(node.get("value_type") or ""),
-                    "label": str(node.get("label") or node.get("hint") or ""),
-                }
+                InputNodeSection.model_validate({
+                    **node, "label": node.get("label") or node.get("hint") or ""
+                }).model_dump()
                 for node in nodes
             ],
         }
-        workflow_dict["input_nodes"] = [InputNodeSection.model_validate({
-            **node, "label": node.get("label") or node.get("hint") or ""
-        }).model_dump() for node in nodes]
         workflow_dict.update({k: v for k, v in (settings or {}).items()
                               if k in {"description", "llm_enhance", "llm_template_path", "output_type", "capability", "prompt_profile", "cost_hint"}})
-        WorkflowItemSection.model_validate(workflow_dict)
-
-        merged = [
-            workflow.model_dump(mode="python")
-            for workflow in self.config.workflows.items
-        ]
-        merged.append(workflow_dict)
-        merged_models = [WorkflowItemSection.model_validate(item) for item in merged]
-        new_raw = await self._persist_workflow_items(merged_models)
+        workflow = WorkflowItemSection.model_validate(workflow_dict)
+        new_raw = await self._persist_workflow_items([workflow], append=True)
         self.logger.info(
             "[识别] 已写入插件配置：workflows=%d, workflow_nodes=%d（本次 %d 个节点）",
             len(new_raw.get("workflows") or []),
@@ -3660,11 +3639,14 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
 
     async def handle_page_get_account(self):
         """可视化页面 API：查询两个区域的 RunningHub 账户余额。"""
+        generation = self._lifecycle_generation
         regions: list[dict[str, Any]] = []
         for region, key_attr, label in (
             ("overseas", "api_key", "国外 runninghub.ai"),
             ("domestic", "api_key_cn", "国内 runninghub.cn"),
         ):
+            if not self._runtime_running(generation):
+                return self._web_jsonify({"success": False, "message": "插件已停用，账户查询已停止"})
             entry: dict[str, Any] = {"region": region, "label": label, "status": "ok", "message": ""}
             api_key = str(getattr(self.config.server, key_attr) or "")
             if not api_key:
@@ -3691,6 +3673,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                     "currency": str(account.get("currency") or ""),
                     "api_type": str(account.get("apiType") or ""),
                 }
+            if not self._runtime_running(generation):
+                return self._web_jsonify({"success": False, "message": "插件已停用，账户查询已停止"})
             regions.append(entry)
         return self._web_jsonify({"success": True, "data": {"regions": regions}})
 
@@ -4133,11 +4117,8 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                 target = self._safe_prompt_template(filename)
                 if target is None:
                     return self._web_jsonify({"success": False, "message": "仅支持 .txt / .md 模板文件"})
-                existed = target.exists()
-                if is_quart:
-                    await uploaded.save(target)
-                else:
-                    uploaded.save(target)
+                # Read a bounded candidate before touching a usable template.
+                file_data = await asyncio.to_thread(uploaded.stream.read, 2 * 1024 * 1024 + 1)
             else:
                 if is_quart:
                     payload = await web_request.get_json(silent=True) or {}
@@ -4153,26 +4134,37 @@ class RunningHubGenericPlugin(TaskManagementMixin, TaskRuntimeMixin, ChatWorkflo
                     return self._web_jsonify({"success": False, "message": "仅支持 .txt / .md 模板文件"})
                 if not isinstance(content, str) or not content.strip():
                     return self._web_jsonify({"success": False, "message": "模板内容不能为空"})
-                if len(content.encode("utf-8")) > 2 * 1024 * 1024:
-                    return self._web_jsonify({"success": False, "message": "文件超过 2MB"})
-                existed = target.exists()
-                target.write_text(content, encoding="utf-8")
+                file_data = content.encode("utf-8")
+
+            size = len(file_data)
+            if size <= 0:
+                return self._web_jsonify({"success": False, "message": "模板内容不能为空"})
+            if size > 2 * 1024 * 1024:
+                return self._web_jsonify({"success": False, "message": "文件超过 2MB"})
+            try:
+                file_data.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._web_jsonify({"success": False, "message": "模板不是 UTF-8 文本"})
+
+            existed = target.exists()
+
+            def write_template() -> None:
+                from tempfile import NamedTemporaryFile
+
+                temporary = None
+                try:
+                    with NamedTemporaryFile(dir=target.parent, prefix=".prompt-upload-", delete=False) as handle:
+                        temporary = Path(handle.name)
+                        handle.write(file_data)
+                    temporary.replace(target)
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+
+            await asyncio.to_thread(write_template)
         except Exception as exc:  # pragma: no cover
             self.logger.error("[页面] 上传模板失败: %s", exc, exc_info=True)
             return self._web_jsonify({"success": False, "message": f"上传失败: {exc}"})
-        try:
-            size = target.stat().st_size
-            if size <= 0:
-                raise ValueError("文件为空")
-            if size > 2 * 1024 * 1024:
-                raise ValueError("文件超过 2MB")
-            target.read_text(encoding="utf-8")
-        except Exception as exc:  # pragma: no cover
-            try:
-                target.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return self._web_jsonify({"success": False, "message": f"模板内容不可用: {exc}"})
         self.logger.info(
             "[页面] 已上传扩写模板: %s（%d 字节，覆盖=%s）", target.name, size, existed
         )

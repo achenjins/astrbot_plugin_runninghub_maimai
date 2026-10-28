@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from astrbot.api.message_components import Video
 
 from rh_generic_lib.delivery import DeliveryReceipt
 from rh_generic_lib.media_store import MediaStore
@@ -25,6 +26,113 @@ async def wait_until(predicate):
     async with asyncio.timeout(3):
         while not predicate():
             await asyncio.sleep(.01)
+
+
+@pytest.mark.parametrize("cancel_code, final_status", [(0, "cancelled"), (403, "needs_attention")])
+def test_cancel_queued_snapshot_cannot_interrupt_a_paid_submission(runtime, monkeypatch, cancel_code, final_status):
+    async def run():
+        enhancing, release_enhancement = asyncio.Event(), asyncio.Event()
+        submitting, cancelling = asyncio.Event(), asyncio.Event()
+        post_started, release_post = asyncio.Event(), asyncio.Event()
+        cancelled_posts, remote_cancellations = [], []
+        runtime.config.workflows.items[0].llm_enhance = True
+        runtime._refresh_workflows()
+
+        async def enhance(*args, **kwargs):
+            enhancing.set()
+            await release_enhancement.wait()
+            return "enhanced"
+
+        async def paid_submit(*args, **kwargs):
+            post_started.set()
+            try:
+                await release_post.wait()
+            except asyncio.CancelledError:
+                cancelled_posts.append(True)
+                raise
+            return "paid-remote"
+
+        async def cancel_remote(task_id):
+            remote_cancellations.append(task_id)
+            return {"code": cancel_code}
+
+        monkeypatch.setattr(runtime, "_enhance_text", enhance)
+        runtime._client.submit, runtime._client.cancel = paid_submit, cancel_remote
+        first = await submit(runtime, mid="cancel-transition")
+        task_id, journal = first["task_id"], runtime._task_journal
+        await enhancing.wait()
+        original_update = journal.update
+
+        async def observe_update(task_id, **updates):
+            if updates.get("status") == "submitting":
+                submitting.set()
+            elif updates.get("status") == "cancelled":
+                cancelling.set()
+            return await original_update(task_id, **updates)
+
+        monkeypatch.setattr(journal, "update", observe_update)
+        # Another task's durable write can hold this shared lock while both
+        # transitions queue. The cancellation observes queued before the POST.
+        await journal._lock.acquire()
+        release_enhancement.set()
+        await submitting.wait()
+        cancellation = asyncio.create_task(runtime._cancel_job(task_id, event().unified_msg_origin, announce=False))
+        await cancelling.wait()
+        journal._lock.release()
+        try:
+            await post_started.wait()
+            response = await cancellation
+            job = journal.get(task_id)
+            assert response["success"] and job["status"] == "submitting" and job["cancel_requested"]
+            assert not cancelled_posts and not remote_cancellations
+            assert runtime._get_task_inputs().directory(task_id).exists()
+            assert journal.quota_used("10001", time.time()) == 1
+        finally:
+            release_post.set()
+            await drain(runtime)
+        job = journal.get(task_id)
+        assert job["status"] == final_status and job["remote_task_id"] == "paid-remote"
+        assert remote_cancellations == ["paid-remote"] and not cancelled_posts
+        assert journal.quota_used("10001", time.time()) == 1
+        assert runtime._get_task_inputs().directory(task_id).exists() == (cancel_code != 0)
+        assert len(journal.recoverable_records()) == (cancel_code != 0)
+    asyncio.run(asyncio.wait_for(run(), JOB_TIMEOUT))
+
+
+def test_cancel_rechecks_when_submission_acquires_its_remote_id(runtime, monkeypatch):
+    async def run():
+        journal = await runtime._load_task_journal()
+        context = runtime._event_ctx(event())
+        await journal.update("rh-cancel-receipt", status="submitting", submitted_at=time.time(),
+                             request={"context": context, "workflow": {}}, **context)
+        attempted = asyncio.Event()
+        original_update = journal.update
+
+        async def observe_update(task_id, **updates):
+            if updates.get("cancel_requested"):
+                attempted.set()
+            return await original_update(task_id, **updates)
+
+        monkeypatch.setattr(journal, "update", observe_update)
+        remote_cancellations = []
+
+        async def cancel_remote(task_id):
+            remote_cancellations.append(task_id)
+            return {"code": 0}
+
+        runtime._client.cancel = cancel_remote
+        await journal._lock.acquire()
+        receipt = asyncio.create_task(journal.update("rh-cancel-receipt", status="pending", remote_task_id="original-remote"))
+        await asyncio.sleep(0)
+        cancellation = asyncio.create_task(runtime._cancel_job("rh-cancel-receipt", context["stream_id"], announce=False))
+        await attempted.wait()
+        journal._lock.release()
+        await receipt
+        response = await cancellation
+        assert response["success"] and journal.get("rh-cancel-receipt")["status"] == "cancelled"
+        assert remote_cancellations == ["original-remote"]
+        assert journal.quota_used(context["user_id"], time.time()) == 1
+    asyncio.run(asyncio.wait_for(run(), JOB_TIMEOUT))
 
 
 def test_same_message_distinct_requests_queue_but_canonical_retries_deduplicate(runtime):
@@ -329,6 +437,44 @@ def test_delivery_retries_only_explicit_failures_without_another_generation(runt
         assert job["outputs"][0]["uncertain"] is (failure != "definite")
         assert job["delivery_status"] == ("sent" if failure == "definite" else "uncertain")
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure,attempts", [("definite", 2), ("uncertain", 1)])
+def test_generic_video_fallback_preserves_explicit_failure_for_retry(runtime, failure, attempts):
+    async def run():
+        url = "https://example.test/result.mp4"
+        video_calls, link_calls = [], []
+        original_send = runtime.context.send_message
+
+        async def result(task_id):
+            return {"status": "SUCCESS", "results": [{"url": url, "outputType": "video"}]}
+
+        async def send(session, chain):
+            if any(isinstance(part, Video) for part in chain.chain):
+                video_calls.append(chain)
+                return False
+            text = "".join(str(getattr(part, "text", "")) for part in chain.chain)
+            if text == url:
+                link_calls.append(text)
+                if failure == "uncertain":
+                    raise TimeoutError("accepted, but acknowledgement lost")
+                if len(link_calls) == 1:
+                    return False
+            return await original_send(session, chain)
+
+        runtime.context.send_message = send
+        runtime._client.wait_for_result = result
+        runtime.config.generation.delivery_retries = 2
+        first = await submit(runtime, mid="video-fallback")
+        await drain(runtime)
+        job = runtime._task_journal.get(first["task_id"])
+        assert len(video_calls) == len(link_calls) == attempts
+        assert len(runtime._client.submissions) == 1
+        assert job["status"] == "success"
+        assert job["outputs"][0]["sent"] is (failure == "definite")
+        assert job["outputs"][0]["uncertain"] is (failure == "uncertain")
+        assert job["delivery_status"] == ("sent" if failure == "definite" else "uncertain")
+    asyncio.run(asyncio.wait_for(run(), JOB_TIMEOUT))
 
 
 @pytest.mark.parametrize("kind,extension", [("audio", "mp3"), ("file", "zip")])

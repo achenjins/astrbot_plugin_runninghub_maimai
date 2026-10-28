@@ -145,10 +145,12 @@ class MediaToolsMixin:
             chains = [(message_id, components)] if origin == "current" else [
                 (str(comp.id), comp.chain or []) for comp in components if isinstance(comp, Reply)]
             for mid, chain in chains:
-                for position, component in enumerate(chain, 1):
+                position = 0
+                for component in chain:
                     kind = self._media_component_type(component)
                     if kind not in {"audio", "video"}:
                         continue
+                    position += 1
                     source = self._image_source(getattr(component, "file", ""), getattr(component, "url", ""))
                     filename = str(getattr(component, "name", "") or "")
                     file_id = self._platform_media_file_id(getattr(component, "file", "")) if isinstance(component, (Record, Video)) else ""
@@ -183,7 +185,8 @@ class MediaToolsMixin:
                             if not context["group_id"] and (group or str(sender.get("user_id") or raw.get("user_id") or "") != context["user_id"]):
                                 complete = False
                                 continue
-                            for position, segment in enumerate(raw.get("message") or [], 1):
+                            position = 0
+                            for segment in raw.get("message") or []:
                                 if not isinstance(segment, dict) or not isinstance(segment.get("data"), dict):
                                     continue
                                 data = segment["data"]
@@ -191,13 +194,23 @@ class MediaToolsMixin:
                                 if segment.get("type") == "file":
                                     kind = self._detect_file_type_from_name(data.get("name", ""))
                                 if kind in {"audio", "video"}:
+                                    position += 1
                                     source = self._image_source(data.get("file"), data.get("url"))
                                     file_id = str(data.get("file_id") or data.get("id") or "")
-                                    if not source and segment.get("type") == "file":
-                                        source = await self._group_file_source(file_id, context, timeout=max(.01, deadline - asyncio.get_running_loop().time()))
-                                    entries.append((kind, source, mid, position, str(data.get("name") or ""),
-                                                    self._platform_media_file_id(data.get("file") or file_id)
-                                                    if segment.get("type") in {"record", "audio", "video"} else ""))
+                                    if segment.get("type") == "file" and (not source or "ftn.qq.com" in source):
+                                        try:
+                                            remaining = deadline - asyncio.get_running_loop().time()
+                                            source = await self._group_file_source(file_id, context, timeout=max(.01, remaining)) if remaining > 0 else ""
+                                        except Exception as exc:
+                                            source = ""
+                                            self.logger.debug("引用音视频文件读取失败: %s", exc)
+                                    platform_id = (self._platform_media_file_id(data.get("file") or file_id)
+                                                   if segment.get("type") in {"record", "audio", "video"} else "")
+                                    if source or platform_id:
+                                        entries = [item for item in entries if (item[2], item[3]) != (mid, position)]
+                                        entries.append((kind, source, mid, position, str(data.get("name") or ""), platform_id))
+                                    else:
+                                        complete = False
                         except Exception as exc:
                             complete = False
                             self.logger.debug("引用音视频读取失败: %s", exc)
@@ -206,7 +219,8 @@ class MediaToolsMixin:
             if origin == "current":
                 raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
                 segments = raw.get("message", []) if isinstance(raw, dict) else []
-                for position, segment in enumerate(segments if isinstance(segments, list) else [], 1):
+                position = 0
+                for segment in segments if isinstance(segments, list) else []:
                     if not isinstance(segment, dict) or not isinstance(segment.get("data"), dict):
                         continue
                     data = segment["data"]
@@ -215,15 +229,23 @@ class MediaToolsMixin:
                         kind = self._detect_file_type_from_name(data.get("name", ""))
                     if kind not in {"audio", "video"}:
                         continue
+                    position += 1
                     source = self._image_source(data.get("file"), data.get("url"))
                     file_id = str(data.get("file_id") or data.get("id") or "")
                     if segment.get("type") == "file" and (not source or "ftn.qq.com" in source):
-                        remaining = deadline - asyncio.get_running_loop().time()
-                        source = await self._group_file_source(file_id, context, timeout=max(.01, remaining)) if remaining > 0 else ""
-                    entries = [item for item in entries if item[3] != position]
-                    entries.append((kind, source, message_id, position, str(data.get("name") or ""),
-                                    self._platform_media_file_id(data.get("file") or file_id)
-                                    if segment.get("type") in {"record", "audio", "video"} else ""))
+                        try:
+                            remaining = deadline - asyncio.get_running_loop().time()
+                            source = await self._group_file_source(file_id, context, timeout=max(.01, remaining)) if remaining > 0 else ""
+                        except Exception as exc:
+                            source = ""
+                            self.logger.debug("当前音视频文件读取失败: %s", exc)
+                    platform_id = (self._platform_media_file_id(data.get("file") or file_id)
+                                   if segment.get("type") in {"record", "audio", "video"} else "")
+                    if source or platform_id:
+                        entries = [item for item in entries if item[3] != position]
+                        entries.append((kind, source, message_id, position, str(data.get("name") or ""), platform_id))
+                    else:
+                        complete = False
             for kind, source, mid, position, filename, file_id in entries[:32]:
                 try:
                     item = registry.remember(owner, kind, source, message_id=mid, position=position,
@@ -354,13 +376,13 @@ class MediaToolsMixin:
             if kind not in MEDIA_TYPES or stamp < time.time() - ttl:
                 raise ValueError("结果素材已过期，请按任务编号补发或重新提供素材")
             return {"ref": ref, "type": kind, "source": url, "task_id": task_id, "position": position}
+        if ref.startswith("avatar:"):
+            await self._validate_image_ref(owner, ref)
+            return {"ref": ref, "type": "image"}
         # Saved aliases remain usable when the short-lived message cache expired.
         memory = await self._find_image_memory(owner, ref)
         if memory is not None:
             return {"ref": ref, "type": "image", "memory_id": memory["memory_id"], "description": memory["description"]}
-        if ref.startswith("avatar:"):
-            await self._validate_image_ref(owner, ref)
-            return {"ref": ref, "type": "image"}
         return {**self._get_media_store().get(owner, ref), "type": "image"}
 
     async def _validate_media_ref(self, owner, ref, kind=""):
@@ -424,7 +446,7 @@ class MediaToolsMixin:
                 try:
                     response = await asyncio.wait_for(
                         bot.call_action("get_record", file=entry["file_id"], out_format="mp3") if kind == "audio" else
-                        bot.call_action("get_video", file=entry["file_id"]), 15)
+                        bot.call_action("get_file", file=entry["file_id"]), 15)
                     data = await self._adapter_media_bytes(response, client, limit)
                     if data:
                         return data, "input_audio.mp3" if kind == "audio" else "input_video.mp4"
@@ -453,26 +475,25 @@ class MediaToolsMixin:
                 return json.dumps({"success": True, "media_id": media_id, "type": entry["type"],
                                    "message": "此工具不解码视频或音频，请依据用户描述绑定用途"}, ensure_ascii=False)
             saved = await self._find_image_memory(owner, media_id)
-            if saved is not None:
+            if saved is not None and saved["description"]:
                 memory = await self._load_image_memory()
                 await memory.touch(owner, "images", saved["memory_id"])
                 return json.dumps({"success": True, "media_id": saved["memory_id"], "type": "image", "cached": True,
-                                   "description": saved["description"], "message": saved["description"] or
-                                   "原图已保存，但暂时没有可靠简介；请依据对话或询问用户，不要反复观察"}, ensure_ascii=False)
+                                   "description": saved["description"], "message": saved["description"]}, ensure_ascii=False)
             client = self._client or self._client_cn
             if client is None:
                 raise ValueError("RunningHub 客户端未初始化")
             # Materialization may have produced an optional automatic summary.
             data, _ = await self._materialize_media(self._get_media_store(), owner, media_id, client, snapshot=entry)
             saved = await self._find_image_memory(owner, media_id)
-            if saved is None:
+            description = saved.get("description", "") if saved else ""
+            if not description:
                 try:
                     description = await self._describe_image(owner, data)
                 except Exception as exc:
                     self.logger.debug("图片显式观察失败: %s", exc)
                     description = ""
                 saved = await self._remember_image_usage(owner, media_id, data, description=description)
-            description = saved.get("description", "") if saved else ""
             return json.dumps({"success": bool(description), "media_id": saved["memory_id"] if saved else media_id,
                                "type": "image", "description": description,
                                "message": description or "图片简介暂不可用，请依据对话或询问用户；不要猜画面或重复观察"}, ensure_ascii=False)

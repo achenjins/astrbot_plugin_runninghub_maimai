@@ -16,14 +16,19 @@ from .media_store import MAX_IMAGE_BYTES, MediaStore
 
 class ImageAssetsMixin:
     async def _group_file_source(self, file_id, context, *, timeout=5):
-        """Resolve only a file ID attached to a trusted current/replied group event."""
-        if not file_id or not context.get("group_id"):
+        """Resolve a file ID attached to a trusted current/replied QQ event."""
+        if not file_id:
             return ""
         bot = self.delivery.get_onebot_client(DeliveryTarget.from_dict(context))
         if bot is None:
             return ""
-        result = await asyncio.wait_for(bot.call_action("get_group_file_url", file_id=str(file_id),
-                                                      group_id=str(context["group_id"])), timeout=timeout)
+        parameters = {"file_id": str(file_id)}
+        if context.get("group_id"):
+            action = "get_group_file_url"
+            parameters["group_id"] = str(context["group_id"])
+        else:
+            action = "get_private_file_url"
+        result = await asyncio.wait_for(bot.call_action(action, **parameters), timeout=timeout)
         if not isinstance(result, dict) or result.get("status") == "failed" or result.get("retcode", 0) != 0:
             return ""
         data = result.get("data", result)
@@ -150,10 +155,6 @@ class ImageAssetsMixin:
         return candidates
 
     async def _validate_image_ref(self, owner, ref):
-        if await self._find_image_memory(owner, ref):
-            return
-        if ref.startswith("im-"):
-            raise ValueError("最近图片编号已过期或不属于当前用户会话")
         if ref.startswith("avatar:"):
             platform, stream, user = json.loads(owner)
             context = {"platform_id": platform, "stream_id": stream, "user_id": user}
@@ -162,6 +163,10 @@ class ImageAssetsMixin:
             if ref not in {a["ref"] for a in self._avatar_candidates(context)}:
                 raise ValueError("头像只能使用当前会话返回的候选编号")
             return
+        if await self._find_image_memory(owner, ref):
+            return
+        if ref.startswith("im-"):
+            raise ValueError("最近图片编号已过期或不属于当前用户会话")
         self._get_media_store().get(owner, ref)
 
     async def _read_special_image(self, owner, ref, client):
@@ -176,26 +181,11 @@ class ImageAssetsMixin:
             return data
         context = self._avatar_scopes[owner]
         target_id = context["group_id"] if ref == "avatar:group" else context["user_id"]
-        bot = self.delivery.get_onebot_client(DeliveryTarget.from_dict(context))
-        urls = []
-        try:
-            payload = await asyncio.wait_for(bot.call_action("get_avatar", type=2 if ref == "avatar:group" else 1,
-                qq=0 if ref == "avatar:group" else int(target_id),
-                group_id=int(target_id) if ref == "avatar:group" else 0), timeout=5)
-            if isinstance(payload, dict) and payload.get("status") != "failed" and payload.get("retcode", 0) == 0:
-                data = payload.get("data", payload)
-                if isinstance(data, dict):
-                    encoded = str(data.get("b64") or data.get("base64") or data.get("binary_data_base64") or "").removeprefix("base64://")
-                    if encoded:
-                        raw = decode_base64_bounded(encoded, MAX_IMAGE_BYTES)
-                        if image_mime(raw):
-                            return raw
-                    urls = [str(data[k]) for k in ("url", "img_url", "face_url") if data.get(k)]
-        except Exception as exc:
-            self.logger.debug("适配器头像读取失败，使用公开头像地址: %s", exc)
-        urls += ([f"https://p.qlogo.cn/gh/{target_id}/{target_id}/640"] if ref == "avatar:group" else
-                 [f"https://q4.qlogo.cn/headimg_dl?dst_uin={target_id}&spec=640",
-                  f"https://thirdqq.qlogo.cn/headimg_dl?dst_uin={target_id}&spec=640"])
+        # NapCat exposes no get_avatar action. These IDs came from the trusted
+        # event and were checked against the current QQ avatar candidates.
+        urls = ([f"https://p.qlogo.cn/gh/{target_id}/{target_id}/640"] if ref == "avatar:group" else
+                [f"https://q4.qlogo.cn/headimg_dl?dst_uin={target_id}&spec=640",
+                 f"https://thirdqq.qlogo.cn/headimg_dl?dst_uin={target_id}&spec=640"])
         for url in urls:
             if not url.startswith(("http://", "https://")):
                 continue

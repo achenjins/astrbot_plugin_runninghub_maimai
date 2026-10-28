@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="./style.css">
 <style>
 *{box-sizing:border-box}
-.hidden{display:none!important}
+.hidden,[hidden]{display:none!important}
 :root{
   --primary:#3c96ca;--primary-dark:#1565c0;--primary-light:#e8f3fa;
   --secondary:#2f86bd;--info:#03c9d7;--success:#00c853;--warning:#ffc107;--error:#f44336;
@@ -456,7 +456,7 @@ dialog::backdrop{background:var(--overlay)}
             <button class="btn text small" id="wfPreviewBtn" type="button"><span class="icon icon-preview" style="width:14px;height:14px" aria-hidden="true"></span>预览</button>
           </div>
           <input type="file" id="wfTemplateFile" accept=".txt,.md,text/plain,text/markdown" hidden>
-          <div class="hint" id="wfTemplateHint">模板存放在插件 prompt/ 目录，上传成功后会自动选中。</div>
+          <div class="hint" id="wfTemplateHint">模板保存在插件持久化数据目录，更新插件时保留；上传后自动选中。</div>
         </div>
         <div class="field full"><label class="check-row"><input type="checkbox" id="wfEnhance"> 启用 LLM 提示词扩写</label></div>
       </div>
@@ -847,7 +847,7 @@ function setDirty(dirty) {
   state.dirty = dirty;
   $("dirtyBadge").classList.toggle("show", dirty);
   $("saveBtn").disabled = state.saving || !dirty;
-  $("saveBtn").textContent = dirty ? "保存配置 ●" : "保存配置";
+  $("saveBtn").textContent = state.saving ? "保存中…" : dirty ? "保存配置 ●" : "保存配置";
 }
 function inferType(fieldName) {
   const f = String(fieldName || "").toLowerCase();
@@ -924,8 +924,7 @@ function validateNode(raw) {
   if (value) {
     const error = valueError(value);
     if (error) return fail(`默认值${error}`);
-    // Numeric normalization and large integers are checked exactly by Python.
-    if (node.param_type === "string" && node.choices.length && !node.choices.includes(value)) return fail(`默认值需选自：${node.choices.join("、")}`);
+    // Python validates choices and canonicalizes short labels and numeric values.
   }
   return { ok: true, node };
 }
@@ -1088,7 +1087,7 @@ function updateTemplateHint() {
   const path = $("wfTemplate").value;
   const t = state.templates.find((item) => item.path === path);
   const hint = $("wfTemplateHint");
-  if (!path) hint.textContent = "未选择模板；模板存放在插件 prompt/ 目录。";
+  if (!path) hint.textContent = "未选择模板；上传模板保存在插件持久化数据目录，更新插件时保留。";
   else if (t) hint.textContent = `${t.name} · ${formatSize(t.size)}`;
   else hint.textContent = `自定义路径：${path}`;
 }
@@ -1305,12 +1304,13 @@ async function saveConfig() {
   state.saving = true;
   $("saveBtn").disabled = true;
   $("saveBtn").textContent = "保存中…";
+  const submitted = clone(state.workflows);
   try {
-    const res = normalizeApiResponse(await bridge.apiPost("page/config", { workflows: state.workflows }));
+    const res = normalizeApiResponse(await bridge.apiPost("page/config", { workflows: submitted }));
     if (!res || res.success === false) throw new Error(res?.message || "保存失败");
-    state.original = clone(state.workflows);
-    setDirty(false);
-    toast(res.message || `已保存 ${res.workflow_nodes || 0} 个节点`, "ok");
+    state.original = submitted;
+    setDirty(JSON.stringify(state.workflows) !== JSON.stringify(submitted));
+    toast(state.dirty ? "本次配置已保存；保存期间的新修改尚未保存" : res.message || `已保存 ${res.workflow_nodes || 0} 个节点`, "ok");
   } catch (err) {
     toast(String(err?.message || err), "err", 5000);
   } finally {

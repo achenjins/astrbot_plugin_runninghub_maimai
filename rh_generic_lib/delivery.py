@@ -174,8 +174,9 @@ class GenericAstrBotChannel(BaseDeliveryChannel):
         except Exception as exc:
             self.logger.warning("通用通道视频发送状态未知，保留人工补发: %s", exc)
             return DeliveryReceipt(False, uncertain=True)
-        sent = await self.send_text(target, video_url)
-        return DeliveryReceipt(sent, as_link=sent, uncertain=not sent)
+        receipt = await self.send_text_result(target, video_url)
+        return DeliveryReceipt(receipt.success, receipt.message_id,
+                               as_link=receipt.success, uncertain=receipt.uncertain)
 
     async def send_file(
         self, target: DeliveryTarget, file_url: str, filename: str = ""
@@ -258,10 +259,6 @@ class OneBotChannel(BaseDeliveryChannel):
             self.logger.warning("OneBot 调用 %s 业务失败: %s", action, str(response)[:200])
             return None
         return response
-
-    async def _send(self, target: DeliveryTarget, segments: list[dict]) -> str:
-        message_id, _ = await self._send_with_status(target, segments)
-        return message_id
 
     async def _send_with_status(
         self, target: DeliveryTarget, segments: list[dict]

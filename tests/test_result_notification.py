@@ -51,6 +51,7 @@ def test_image_memory_failure_cannot_turn_successful_send_into_retry(bot):
 class Conversations:
     def __init__(self):
         self.current = "original"
+        self.persona_id = "甘雨"
         self.records = {"original": [{"role": "user", "content": "画一张水彩图"}]}
 
     async def get_curr_conversation_id(self, stream):
@@ -64,7 +65,7 @@ class Conversations:
     async def get_conversation(self, stream, cid):
         if cid not in self.records:
             return None
-        return SimpleNamespace(history=json.dumps(self.records[cid]), persona_id="甘雨")
+        return SimpleNamespace(history=json.dumps(self.records[cid]), persona_id=self.persona_id)
 
     async def update_conversation(self, stream, cid, *, history):
         self.records[cid] = copy.deepcopy(history)
@@ -140,6 +141,57 @@ def test_media_then_one_persona_reply_preserves_new_messages_and_no_tools(bot):
         assert len(bot.calls) == 1 and len(star.context.sent) == 2
         assert not star._client.submissions
     asyncio.run(run())
+
+
+class LegacyPersonas:
+    """AstrBot 4.13 exposes personas_v3 and this async default lookup."""
+
+    def __init__(self):
+        self.personas_v3 = [
+            {"name": name, "prompt": prompt, "_begin_dialogs_processed": [
+                {"role": "user", "content": f"{name}的预设问题"},
+                {"role": "assistant", "content": f"{name}的预设回答"},
+            ]}
+            for name, prompt in [("甘雨", "指定的甘雨人格"), ("default", "内置默认人格"),
+                                 ("configured", "会话配置的默认人格")]
+        ]
+        self.default_calls = []
+
+    async def get_default_persona_v3(self, umo=None):
+        self.default_calls.append(umo)
+        return self.personas_v3[2]
+
+
+@pytest.mark.parametrize("persona_id,configured_default,expected_prompt,default_calls", [
+    ("甘雨", "configured", "指定的甘雨人格", 0),
+    (None, "configured", "会话配置的默认人格", 1),
+    ("", "configured", "会话配置的默认人格", 1),
+    ("default", "configured", "内置默认人格", 0),
+    ("removed-persona", "configured", "", 0),
+    ("[%None]", "configured", "", 0),
+    (None, "[%None]", "", 0),
+])
+def test_legacy_persona_lookup_keeps_selected_or_default_context(bot, persona_id, configured_default, expected_prompt, default_calls):
+    legacy = LegacyPersonas()
+    bot.plugin.context.persona_manager = legacy
+    bot.plugin.context.get_config = lambda stream: {"provider_settings": {"default_personality": configured_default}}
+    bot.manager.persona_id = persona_id
+
+    asyncio.run(finish(bot))
+
+    assert len(bot.calls) == 1
+    request = bot.calls[0]
+    assert request["tools"] is None
+    if expected_prompt:
+        assert request["system_prompt"].startswith(expected_prompt)
+        selected = next(p for p in legacy.personas_v3 if p["prompt"] == expected_prompt)
+        assert request["contexts"][:2] == selected["_begin_dialogs_processed"]
+    else:
+        # A removed or explicitly disabled persona must not borrow the default.
+        assert all(p["prompt"] not in request["system_prompt"] for p in legacy.personas_v3)
+        assert request["contexts"][0] == {"role": "user", "content": "画一张水彩图"}
+    assert legacy.default_calls == [event().unified_msg_origin] * default_calls
+    assert messages(bot.plugin)[-1] == "你的水彩图已经送到啦。"
 
 
 def test_disabled_reply_still_records_completion(bot):

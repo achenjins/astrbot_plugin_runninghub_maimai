@@ -25,7 +25,12 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: requirements*.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - run: python -m pip install -r requirements-dev.txt
       - name: Verify upstream provenance and unmodified core
         run: python scripts/sync_upstream_lib.py --check
+      - name: Verify Pages editor behavior
+        run: node --test tests/pages_editor.test.cjs
       - run: python -B -m pytest -q

@@ -1,8 +1,6 @@
 """Persistent image use, optional vision, trusted file sources and scoped avatars."""
 import asyncio
-import base64
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -93,22 +91,27 @@ def test_vision_single_flight_uses_astrbot_provider_and_no_tools(plugin):
     asyncio.run(run())
 
 
-def test_avatar_candidates_only_use_current_user_and_group(plugin):
+@pytest.mark.parametrize("avatar_ref,expected_url", [
+    ("avatar:self", "https://q4.qlogo.cn/headimg_dl?dst_uin=10001&spec=640"),
+    ("avatar:group", "https://p.qlogo.cn/gh/20001/20001/640"),
+])
+def test_avatar_candidates_only_use_current_user_and_group(plugin, avatar_ref, expected_url):
     async def run():
         calls = []
 
         async def action(name, **kwargs):
             calls.append((name, kwargs))
-            return {"retcode": 0, "data": {"b64": base64.b64encode(PNG).decode()}}
+            raise AssertionError("NapCat has no get_avatar action")
 
         plugin.context.platform_inst = SimpleNamespace(get_client=lambda: SimpleNamespace(call_action=action))
         request = event()
         context = json.loads(await plugin.handle_workflow_context(request))
         assert {r["ref"] for r in context["avatars"]} == {"avatar:self", "avatar:group"}
         assert not context["images"]
-        await plugin.handle_run_workflow(request, "", "画我", image_refs=["avatar:self"])
+        await plugin.handle_run_workflow(request, "", "画头像", image_refs=[avatar_ref])
         await finish_jobs(plugin)
-        assert calls == [("get_avatar", {"type": 1, "qq": 10001, "group_id": 0})]
+        assert calls == []
+        assert plugin._client.downloads == [expected_url]
         assert plugin._client.uploads[0][0] == PNG
         plugin.config.feature.avatar_candidates = False
         assert "候选" in await plugin.handle_run_workflow(event(mid="2"), "", "画群头像", image_refs=["avatar:group"])
@@ -116,15 +119,21 @@ def test_avatar_candidates_only_use_current_user_and_group(plugin):
     asyncio.run(run())
 
 
-def test_avatar_rejects_non_image_adapter_data_and_uses_cdn(plugin):
+def test_avatar_rejects_non_image_cdn_data_and_tries_the_next_trusted_url(plugin):
     async def run():
-        async def action(name, **kwargs):
-            return {"data": {"base64": base64.b64encode(b"not an image").decode()}}
+        downloads = []
 
-        plugin.context.platform_inst = SimpleNamespace(get_client=lambda: SimpleNamespace(call_action=action))
-        await plugin.handle_run_workflow(event(), "", "画群头像", image_refs=["avatar:group"])
+        async def download(url, **kwargs):
+            downloads.append(url)
+            return b"not an image" if len(downloads) == 1 else PNG
+
+        plugin.context.platform_inst = SimpleNamespace(get_client=lambda: SimpleNamespace())
+        plugin._client.download_bytes = download
+        await plugin.handle_run_workflow(event(), "", "画我", image_refs=["avatar:self"])
         await finish_jobs(plugin)
-        assert plugin._client.downloads == ["https://p.qlogo.cn/gh/20001/20001/640"]
+        assert downloads == ["https://q4.qlogo.cn/headimg_dl?dst_uin=10001&spec=640",
+                             "https://thirdqq.qlogo.cn/headimg_dl?dst_uin=10001&spec=640"]
+        assert plugin._client.uploads[0][0] == PNG
     asyncio.run(run())
 
 

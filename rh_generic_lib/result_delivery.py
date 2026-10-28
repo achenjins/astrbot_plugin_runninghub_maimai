@@ -54,6 +54,9 @@ class ResultDeliveryMixin:
                 self.logger.warning("更新结果发送记录失败: %s", exc)
 
     async def _send_saved_output(self, record: dict, index: int, target: DeliveryTarget, client: Any) -> tuple[DeliveryReceipt, str]:
+        generation = self._lifecycle_generation
+        if not self._runtime_running(generation):
+            return DeliveryReceipt(False), "插件已停用，本次结果未发送，请重新启用后补发"
         output = record["outputs"][index]
         url, output_type = output["url"], output["type"]
         task_id = record["task_id"]
@@ -77,6 +80,8 @@ class ResultDeliveryMixin:
                 except Exception as exc:
                     self.logger.warning("任务 %s 第 %d 项下载失败: %s", task_id, index + 1, exc)
                     return DeliveryReceipt(False), "下载失败（链接可能过期）"
+            if not self._runtime_running(generation):
+                return DeliveryReceipt(False), "插件已停用，本次结果未发送，请重新启用后补发"
             try:
                 ref = self._remember_generated_image(task_id, index + 1, url, target.stream_id, context, data64)
                 if ref:

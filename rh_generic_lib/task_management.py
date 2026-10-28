@@ -58,11 +58,18 @@ class TaskManagementMixin:
                 "actions": actions, "busy": task_id in self._page_task_actions}
 
     async def _perform_task_action(self, task_id, action, selection="", *, owner=None, request_key=""):
+        generation = self._lifecycle_generation
+        def require_running():
+            if not self._runtime_running(generation):
+                raise ValueError("插件已停用，任务操作未执行")
+
+        require_running()
         if action not in {"cancel", "resume", "resend"}:
             raise ValueError("仅支持取消、恢复查询和补发结果")
         journal = await self._load_task_journal()
         lock = self._task_action_locks.setdefault(task_id, asyncio.Lock())
         async with lock:
+            require_running()
             job = journal.get(task_id)
             if not job or (owner is not None and MediaStore.owner(job) != owner):
                 raise ValueError("当前会话没有此任务")
@@ -79,11 +86,13 @@ class TaskManagementMixin:
                 actions[action_key] = {"success": False, "message": "这条消息的操作已接收；结果未确认时请先查看任务状态，不要重复执行。"}
                 await journal.update(task_id, actions=actions)
             try:
+                require_running()
                 if action == "cancel":
                     result = await self._cancel_job(task_id, job["stream_id"], announce=False)
                 elif action == "resume":
                     if job["status"] == "queued" or (job["remote_task_id"] and job["status"] in {"pending", "tracking_paused", "needs_attention"}):
                         await self._limiter.resize(self.config.generation.max_concurrent)
+                        require_running()
                         self._schedule_job(job)
                         result = {"success": True, "message": "已恢复处理已有任务；已提交的任务仅查询原平台编号。"}
                     else:
@@ -157,7 +166,12 @@ class TaskManagementMixin:
 
     async def handle_page_task_action(self):
         try:
+            generation = self._lifecycle_generation
+            if not self._runtime_running(generation):
+                raise ValueError("插件已停用，任务操作未执行")
             payload = await self._web_request_json()
+            if not self._runtime_running(generation):
+                raise ValueError("插件已停用，任务操作未执行")
             if not isinstance(payload, dict):
                 raise ValueError("请求格式无效")
             task_id, action = str(payload.get("task_id", "")), str(payload.get("action", ""))
@@ -165,6 +179,8 @@ class TaskManagementMixin:
             if action not in {"cancel", "resume", "resend"} or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id):
                 raise ValueError("任务操作或请求编号无效")
             journal = await self._load_task_journal()
+            if not self._runtime_running(generation):
+                raise ValueError("插件已停用，任务操作未执行")
             job = journal.get(task_id)
             if not job:
                 raise ValueError("任务不存在")
@@ -177,7 +193,8 @@ class TaskManagementMixin:
             self._page_task_actions.add(task_id)
             async def execute():
                 try:
-                    await self._perform_task_action(task_id, action, selection, request_key="page:" + request_id)
+                    if self._runtime_running(generation):
+                        await self._perform_task_action(task_id, action, selection, request_key="page:" + request_id)
                 finally:
                     self._page_task_actions.discard(task_id)
             task = asyncio.create_task(execute())

@@ -199,7 +199,8 @@ class ChatWorkflowMixin(MediaToolsMixin):
                    for comp in event.get_messages()):
             return
         context = self._event_ctx(event)
-        allowed, _ = self._check_access(context["user_id"], context["group_id"], check_quota=False)
+        allowed, _ = self._check_access(context["user_id"], context["group_id"], check_quota=False,
+                                        natural_language=True)
         if allowed:
             try:
                 await self._remember_event_media(event, observing=True)

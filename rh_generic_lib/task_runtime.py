@@ -23,6 +23,10 @@ from .upstream.media_plan import request_fingerprint
 
 
 class TaskRuntimeMixin:
+    def _runtime_running(self, generation=None):
+        return (not self._stopping
+                and (generation is None or generation == self._lifecycle_generation))
+
     def _get_task_inputs(self):
         if self._task_inputs is None:
             self._task_inputs = TaskInputs(self._prompt_library_path().parent / "task_inputs")
@@ -97,6 +101,10 @@ class TaskRuntimeMixin:
         attempt = 0
         busy_since = float(record.get("busy_since") or time.time())
         while True:
+            if not self._runtime_running():
+                await journal.update(task_id, status="queued", submitted_at=0, message="插件已停用，等待重新启用",
+                                     expected_statuses={"submitting"})
+                return None
             try:
                 return await client.submit(nodes, instance_type=workflow.instance_type, workflow_id=workflow.workflow_id)
             except RunningHubBusyError as exc:
@@ -198,60 +206,97 @@ class TaskRuntimeMixin:
         return None
 
     async def _reserve_job(self, client, workflow, node_info_list, stream_id, kwargs):
+        generation = kwargs.get("_lifecycle_generation", self._lifecycle_generation)
+        def require_running():
+            if not self._runtime_running(generation):
+                raise ValueError("插件已停用，本次请求未提交")
+
         context = {**kwargs, "stream_id": stream_id}
         if not MediaStore.owner(context):
             return {"success": False, "message": "无法识别当前用户或会话"}
         if context.get("natural") and not context.get("anchor_id"):
             return {"success": False, "message": "无法定位本次请求的触发消息，请重新发送生成要求"}
+        task_id, journal = "", None
         try:
+            require_running()
             async with self._request_lock:
-                journal = await self._load_task_journal()
-                previous = await self._find_event_job(context, workflow.model_dump(), node_info_list)
-                if previous:
-                    return {"success": True, "duplicate": True, "task_id": previous["task_id"],
-                            "status": previous["status"], "message": "本条消息的任务已记录，请勿重复生成"}
-                allowed, reason = self._check_access(context["user_id"], context.get("group_id", ""), check_quota=False,
-                                                     natural_language=bool(context.get("natural")))
-                if not allowed:
-                    raise ValueError(reason)
-                limit = self.config.access.max_per_user_per_hour
-                if limit and journal.quota_used(context["user_id"], time.time()) >= limit:
-                    raise ValueError("本小时的任务次数已达上限（包含排队及提交未确认的任务）")
-                active = sum(r["status"] in ACTIVE_STATUSES for r in journal.records())
-                if active >= self.config.generation.max_concurrent + self.config.generation.max_queued:
-                    raise ValueError("任务队列已满，请稍后再试；用 /wf状态 查看，或 /wf中断 取消旧任务")
-                # Only host-derived serializable context is persisted. Never keep SDK events or keys.
-                saved_context = {k: copy.deepcopy(context[k]) for k in (
-                    "user_id", "group_id", "platform_id", "platform_name", "stream_id", "anchor_id",
-                    "result_context", "image_bindings", "image_sources", "natural", "skip_enhance",
-                    "actual_file_desc", "trigger", "media_bindings", "media_sources") if k in context}
-                request = {"workflow": workflow.model_dump(), "nodes": copy.deepcopy(node_info_list),
-                           "context": saved_context}
-                identity = await self._generation_identity(saved_context, request["workflow"], request["nodes"])
-                request_key = request_fingerprint(MediaStore.owner(context), context["user_id"], context.get("anchor_id", ""), identity)
-                task_id = "rh-" + uuid.uuid4().hex[:16]
                 try:
-                    inputs = await self._preserve_job_inputs(task_id, request, local_only=True)
-                    await journal.update(task_id, status="queued", stage="preparing_inputs", inputs=inputs,
-                                         submitted_at=0, request_key=request_key, request=request, workflow=workflow.name, region=workflow.region,
-                                         **{k: context.get(k, "") for k in ("stream_id", "user_id", "group_id", "platform_id", "platform_name", "anchor_id")})
-                except BaseException:
-                    if not journal.get(task_id):
-                        await self._get_task_inputs().release_async(task_id)
+                    require_running()
+                    journal = await self._load_task_journal()
+                    require_running()
+                    previous = await self._find_event_job(context, workflow.model_dump(), node_info_list)
+                    require_running()
+                    if previous:
+                        return {"success": True, "duplicate": True, "task_id": previous["task_id"],
+                                "status": previous["status"], "message": "本条消息的任务已记录，请勿重复生成"}
+                    allowed, reason = self._check_access(context["user_id"], context.get("group_id", ""), check_quota=False,
+                                                         natural_language=bool(context.get("natural")))
+                    if not allowed:
+                        raise ValueError(reason)
+                    limit = self.config.access.max_per_user_per_hour
+                    if limit and journal.quota_used(context["user_id"], time.time()) >= limit:
+                        raise ValueError("本小时的任务次数已达上限（包含排队及提交未确认的任务）")
+                    active = sum(r["status"] in ACTIVE_STATUSES for r in journal.records())
+                    if active >= self.config.generation.max_concurrent + self.config.generation.max_queued:
+                        raise ValueError("任务队列已满，请稍后再试；用 /wf状态 查看，或 /wf中断 取消旧任务")
+                    # Only host-derived serializable context is persisted. Never keep SDK events or keys.
+                    saved_context = {k: copy.deepcopy(context[k]) for k in (
+                        "user_id", "group_id", "platform_id", "platform_name", "stream_id", "anchor_id",
+                        "result_context", "image_bindings", "image_sources", "natural", "skip_enhance",
+                        "actual_file_desc", "trigger", "media_bindings", "media_sources") if k in context}
+                    request = {"workflow": workflow.model_dump(), "nodes": copy.deepcopy(node_info_list),
+                               "context": saved_context}
+                    identity = await self._generation_identity(saved_context, request["workflow"], request["nodes"])
+                    require_running()
+                    request_key = request_fingerprint(MediaStore.owner(context), context["user_id"], context.get("anchor_id", ""), identity)
+                    task_id = "rh-" + uuid.uuid4().hex[:16]
+                    try:
+                        inputs = await self._preserve_job_inputs(task_id, request, local_only=True)
+                        require_running()
+                        await journal.update(task_id, status="queued", stage="preparing_inputs", inputs=inputs,
+                                             submitted_at=0, request_key=request_key, request=request, workflow=workflow.name, region=workflow.region,
+                                             **{k: context.get(k, "") for k in ("stream_id", "user_id", "group_id", "platform_id", "platform_name", "anchor_id")})
+                        # A shutdown can arrive while the durable reservation is written.
+                        # Keep an explicit terminal record so a reload cannot submit it.
+                        if not self._runtime_running(generation):
+                            await journal.update(task_id, status="cancelled", submitted_at=0,
+                                                 message="插件停用期间取消了尚未提交的请求", expected_statuses={"queued"})
+                            await self._release_terminal_inputs(task_id)
+                            require_running()
+                    except BaseException:
+                        if not journal.get(task_id):
+                            await self._get_task_inputs().release_async(task_id)
+                        raise
+                    await self._limiter.resize(self.config.generation.max_concurrent)
+                    if not self._runtime_running(generation):
+                        await journal.update(task_id, status="cancelled", submitted_at=0,
+                                             message="插件停用期间取消了尚未提交的请求", expected_statuses={"queued"})
+                        await self._release_terminal_inputs(task_id)
+                        require_running()
+                    self._schedule_job(journal.get(task_id))
+                    try:
+                        self._remember_workflow_run(task_id, workflow, node_info_list, stream_id, kwargs)
+                    except Exception as exc:
+                        self.logger.warning("任务已记录，但复用记录保存失败: %s", exc)
+                    self._set_workflow_run_state(task_id, stream_id, kwargs, "queued", "已记录，等待后台处理")
+                    result = {"success": True, "task_id": task_id, "status": "queued",
+                              "message": f"已接手，任务 {task_id} 将在后台运行，完成后通知。"}
+                    blocked = sum(r["status"] in {"unknown_submission", "needs_attention"} for r in journal.records())
+                    if blocked >= self.config.generation.max_concurrent:
+                        result["notice"] = f"有 {blocked} 个任务待管理员核对并占用名额；用 /wf状态 查看，再用 /wf核对 处理。"
+                    return result
+                except asyncio.CancelledError:
+                    # Keep cleanup under the reservation lock so terminate
+                    # cannot return with an unacknowledged queued job.
+                    if task_id and journal and journal.get(task_id):
+                        await journal.update(task_id, status="cancelled", submitted_at=0,
+                                             message="请求中断，尚未提交的平台任务已取消", expected_statuses={"queued"})
+                        await self._release_terminal_inputs(task_id)
                     raise
-                await self._limiter.resize(self.config.generation.max_concurrent)
-                self._schedule_job(journal.get(task_id))
-                try:
-                    self._remember_workflow_run(task_id, workflow, node_info_list, stream_id, kwargs)
-                except Exception as exc:
-                    self.logger.warning("任务已记录，但复用记录保存失败: %s", exc)
-                self._set_workflow_run_state(task_id, stream_id, kwargs, "queued", "已记录，等待后台处理")
-                result = {"success": True, "task_id": task_id, "status": "queued",
-                          "message": f"已接手，任务 {task_id} 将在后台运行，完成后通知。"}
-                blocked = sum(r["status"] in {"unknown_submission", "needs_attention"} for r in journal.records())
-                if blocked >= self.config.generation.max_concurrent:
-                    result["notice"] = f"有 {blocked} 个任务待管理员核对并占用名额；用 /wf状态 查看，再用 /wf核对 处理。"
-                return result
+        except asyncio.CancelledError:
+            if not self._runtime_running(generation):
+                return {"success": False, "message": "插件已停用，本次请求未提交"}
+            raise
         except (OSError, ValueError, RunningHubError) as exc:
             return {"success": False, "message": str(exc)}
 
@@ -263,6 +308,8 @@ class TaskRuntimeMixin:
                            "stop_after_execution": True, "next_action": "仅提交用户明确要求的不同生成；相同内容不重提，完成后等待后台通知，不要轮询"}, ensure_ascii=False)
 
     def _schedule_job(self, record):
+        if not self._runtime_running():
+            return
         task_id = record["task_id"]
         if task_id in self._pending and not self._pending[task_id].done():
             self._reschedule_requested.add(task_id)
@@ -314,6 +361,8 @@ class TaskRuntimeMixin:
                 self._schedule_job(record)
 
     async def _run_job(self, task_id):
+        if not self._runtime_running():
+            return
         journal = await self._load_task_journal()
         try:
             record = journal.get(task_id)
@@ -530,38 +579,45 @@ class TaskRuntimeMixin:
             latest = journal.get(task_id)
             return {"success": bool(latest and (latest["status"] == "cancelled" or (latest["status"] == "submitting" and latest.get("cancel_requested")))),
                     "status": latest["status"] if latest else "missing", "message": message}
-        record = journal.get(task_id)
-        if record is None:
-            return await reply("任务不存在或已结束")
-        status = record["status"]
-        if status not in ACTIVE_STATUSES:
-            return await reply("任务已结束，不再取消或重新生成")
-        if status == "submitting":
-            await journal.update(task_id, cancel_requested=True, expected_statuses={"submitting"})
-            return await reply("正在提交，已记下取消请求；取得平台编号后再取消，请勿重复生成。")
-        if status == "unknown_submission":
-            return await reply(f"提交状态未知，保留名额；请管理员用 /wf核对 {task_id} 核对平台任务。")
-        if status != "queued":
-            client = self._get_client(record["region"])
-            try:
-                if client is None:
-                    raise RunningHubError("对应区域客户端不可用")
-                result = await client.cancel(record["remote_task_id"])
-                if not isinstance(result, dict) or not result:
-                    raise RunningHubTransportError("取消响应未确认")
-                if result.get("code") not in (0, 200) or result.get("status") == "failed":
-                    raise RunningHubError(f"平台拒绝取消：{str(result)[:200]}")
-            except Exception as exc:
-                # A late refusal cannot overwrite a concurrently observed success.
-                latest = journal.get(task_id)
-                if latest["status"] not in ACTIVE_STATUSES:
-                    return await reply("任务已结束，已保留生成结果。")
-                if not isinstance(exc, (RunningHubTransportError, TimeoutError)):
-                    await journal.update(task_id, status="needs_attention", message=f"取消被拒绝：{str(exc)[:200]}", expected_statuses=ACTIVE_STATUSES)
-                return await reply("平台取消未确认，任务可能继续运行；保留编号、查询和运行名额，请核对 RunningHub。")
-        changed = await journal.update(task_id, status="cancelled", message="已取消", expected_statuses=ACTIVE_STATUSES)
-        if not changed:
-            return await reply("任务已完成，已保留生成结果。")
+        while True:
+            record = journal.get(task_id)
+            if record is None:
+                return await reply("任务不存在或已结束")
+            status = record["status"]
+            if status not in ACTIVE_STATUSES:
+                return await reply("任务已结束，不再取消或重新生成")
+            if status == "submitting":
+                if await journal.update(task_id, cancel_requested=True, expected_statuses={"submitting"}):
+                    return await reply("正在提交，已记下取消请求；取得平台编号后再取消，请勿重复生成。")
+                # The POST may have acquired its remote ID while this write waited.
+                continue
+            if status == "unknown_submission":
+                return await reply(f"提交状态未知，保留名额；请管理员用 /wf核对 {task_id} 核对平台任务。")
+            if status != "queued":
+                client = self._get_client(record["region"])
+                try:
+                    if client is None:
+                        raise RunningHubError("对应区域客户端不可用")
+                    result = await client.cancel(record["remote_task_id"])
+                    if not isinstance(result, dict) or not result:
+                        raise RunningHubTransportError("取消响应未确认")
+                    if result.get("code") not in (0, 200) or result.get("status") == "failed":
+                        raise RunningHubError(f"平台拒绝取消：{str(result)[:200]}")
+                except Exception as exc:
+                    # A late refusal cannot overwrite a concurrently observed success.
+                    latest = journal.get(task_id)
+                    if latest["status"] not in ACTIVE_STATUSES:
+                        return await reply("任务已结束，已保留生成结果。")
+                    if not isinstance(exc, (RunningHubTransportError, TimeoutError)):
+                        await journal.update(task_id, status="needs_attention", message=f"取消被拒绝：{str(exc)[:200]}", expected_statuses=ACTIVE_STATUSES)
+                    return await reply("平台取消未确认，任务可能继续运行；保留编号、查询和运行名额，请核对 RunningHub。")
+            # A queued snapshot must not cancel a POST that started while waiting
+            # for the shared journal lock. Re-read and request remote cancellation.
+            expected = {"queued"} if status == "queued" else ACTIVE_STATUSES
+            if await journal.update(task_id, status="cancelled", message="已取消", expected_statuses=expected):
+                break
+            if status != "queued":
+                return await reply("任务已完成，已保留生成结果。")
         worker = self._pending.get(task_id)
         if worker and worker is not asyncio.current_task():
             worker.cancel()
