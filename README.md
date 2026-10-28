@@ -8,7 +8,7 @@
 [![Pages](https://img.shields.io/badge/Pages-4.24.2%2B-2ea44f)](#pages-可视化管理)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#许可证)
 
-![running](https://count.kjchmc.cn/get/@astraajinse?theme=gelbooru)
+![running](https://count.getloli.com/get/@rh-dshaajinse?theme=asoul&darkmode=0)
 
 </div>
 
@@ -216,3 +216,7 @@ pip install -r requirements.txt
 ## 许可证
 
 [MIT](./LICENSE)
+
+<!-- 访问统计备用：原服务恢复后，可用下方图片链接替换顶部统计。
+![running](https://count.kjchmc.cn/get/@astraajinse?theme=gelbooru)
+-->
