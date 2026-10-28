@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="./style.css">
 <style>
 *{box-sizing:border-box}
-.hidden{display:none!important}
+.hidden,[hidden]{display:none!important}
 :root{
   --primary:#3c96ca;--primary-dark:#1565c0;--primary-light:#e8f3fa;
   --secondary:#2f86bd;--info:#03c9d7;--success:#00c853;--warning:#ffc107;--error:#f44336;
@@ -141,7 +141,7 @@ textarea{resize:vertical;min-height:68px}
   .task-panel-head h2{margin:0 auto 0 0;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
   .task-panel-head .count{color:var(--muted);font-size:12px;font-weight:400}
   .task-table-head,.task-row{
-    display:grid;grid-template-columns:minmax(160px,1.35fr) minmax(120px,1fr) 132px;gap:16px;
+    display:grid;grid-template-columns:minmax(150px,1.5fr) minmax(100px,1fr) minmax(155px,1.2fr) 90px minmax(105px,.8fr);gap:12px;
     align-items:center;padding:13px 18px;
   }
   .task-table-head{
@@ -172,6 +172,14 @@ textarea{resize:vertical;min-height:68px}
   .task-empty h3{margin:0 0 6px;font-size:15px;color:var(--text)}
   .task-empty p{margin:0;font-size:13px}
   .task-error{color:var(--error);font-size:12px;margin:0}
+  .task-detail{grid-column:1/-1;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+  .task-detail summary{cursor:pointer}
+  .task-progress{font-size:12px;line-height:1.7;overflow-wrap:anywhere}
+  .task-progress small{display:block;color:var(--muted)}
+  .task-operations{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+  .task-filter{max-width:170px;font-size:12px;padding:6px 8px}
+  .task-summary-note{padding:10px 18px;margin:0;font-size:12px;color:var(--muted)}
+  @media(max-width:900px) and (min-width:641px){.task-table-head,.task-row{grid-template-columns:minmax(125px,1fr) 95px 145px 65px 82px;gap:8px;padding:12px}}
 .stat-icon{width:44px;height:44px;border-radius:11px;display:grid;place-items:center;flex:0 0 auto}
 .stat-icon.blue{background:var(--primary-light);color:var(--primary)}
 .stat-icon.teal{background:rgba(3,201,215,.10);color:var(--info)}
@@ -307,8 +315,9 @@ dialog::backdrop{background:var(--overlay)}
     .balance-grid{grid-template-columns:1fr}
     .task-summary-grid{grid-template-columns:1fr}
     .task-table-head{display:none}
-    .task-row{grid-template-columns:1fr auto;grid-template-areas:"workflow coins" "id id";row-gap:8px}
+    .task-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"workflow coins" "id id" "progress operations" "detail detail";row-gap:8px}
     .task-workflow{grid-area:workflow}.task-coins{grid-area:coins}.task-id{grid-area:id}
+    .task-progress{grid-area:progress}.task-operations{grid-area:operations}.task-detail{grid-area:detail}
   .grid{columns:1;column-gap:0}
   .app{padding:12px 12px 64px}
   .brand .sub{display:none}
@@ -401,19 +410,23 @@ dialog::backdrop{background:var(--overlay)}
         <div class="task-panel-head">
           <h2><span class="icon icon-history" style="width:16px;height:16px" aria-hidden="true"></span>最近任务记录<span class="count" id="taskCountLabel"></span></h2>
           <button class="btn text small" id="taskRefreshBtn"><span class="icon icon-refresh" style="width:14px;height:14px" aria-hidden="true"></span>刷新</button>
-          <button class="btn danger-text small" id="taskClearBtn" disabled><span class="icon icon-delete" style="width:14px;height:14px" aria-hidden="true"></span>清空记录</button>
+          <select id="taskFilter" class="task-filter" aria-label="筛选任务状态"><option value="all">全部任务</option><option value="active">运行和排队</option><option value="attention">需要处理</option><option value="ended">已结束</option></select>
+          <button class="btn danger-text small" id="taskClearBtn" disabled><span class="icon icon-delete" style="width:14px;height:14px" aria-hidden="true"></span>清理已结束</button>
         </div>
         <div class="task-table-head">
           <div>任务 ID</div>
           <div>工作流</div>
+          <div>状态 / 耗时</div>
           <div style="text-align:right">RH 币消耗</div>
+          <div style="text-align:right">操作</div>
         </div>
         <div id="taskList"></div>
         <div class="task-empty hidden" id="taskEmptyState">
           <div class="big"><span class="icon icon-history" style="width:28px;height:28px" aria-hidden="true"></span></div>
           <h3>还没有任务记录</h3>
-          <p>通过插件运行工作流后，成功的任务会记录到这里（任务 ID / 工作流 / RH 币消耗）。</p>
+          <p>当前筛选下没有任务。运行工作流后可在这里查看进度和结果。</p>
         </div>
+        <p class="task-summary-note" id="taskActivity">任务页面每 5 秒刷新。补发发送到原会话；恢复查询沿用已有任务。</p>
       </div>
     </section>
 
@@ -425,10 +438,13 @@ dialog::backdrop{background:var(--overlay)}
     <div class="dialog-body">
       <div class="form-grid">
         <div class="field full"><label for="wfName">工作流名称 *</label><input id="wfName" maxlength="64" placeholder="例如：动漫生图"></div>
+        <div class="field full"><label for="wfDescription">用途说明</label><textarea id="wfDescription" maxlength="1000" rows="3" placeholder="例如：根据人物参考图换背景，保留人物外观。模型将根据此说明选择工作流。"></textarea></div>
+        <div class="field full"><label class="check-row"><input type="checkbox" id="wfLlmEnabled" checked> 允许自然语言调用（支持聊天图片与参数）</label></div>
         <div class="field full"><label for="wfId">工作流 ID *</label><input id="wfId" maxlength="64" placeholder="例如：2087492768787685378"></div>
         <div class="field"><label for="wfInstance">设备类型</label>
           <select id="wfInstance"><option value="Standard">Standard</option><option value="Plus">Plus</option><option value="Ultra">Ultra</option></select>
         </div>
+        <div class="field"><label for="wfOutputType">输出类型</label><select id="wfOutputType"><option value="auto">自动</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option><option value="file">文件</option></select></div>
         <div class="field"><label for="wfRegion">区域</label>
           <select id="wfRegion"><option value="overseas">国外 runninghub.ai</option><option value="domestic">国内 runninghub.cn</option></select>
         </div>
@@ -440,7 +456,7 @@ dialog::backdrop{background:var(--overlay)}
             <button class="btn text small" id="wfPreviewBtn" type="button"><span class="icon icon-preview" style="width:14px;height:14px" aria-hidden="true"></span>预览</button>
           </div>
           <input type="file" id="wfTemplateFile" accept=".txt,.md,text/plain,text/markdown" hidden>
-          <div class="hint" id="wfTemplateHint">模板存放在插件 prompt/ 目录，上传成功后会自动选中。</div>
+          <div class="hint" id="wfTemplateHint">模板保存在插件持久化数据目录，更新插件时保留；上传后自动选中。</div>
         </div>
         <div class="field full"><label class="check-row"><input type="checkbox" id="wfEnhance"> 启用 LLM 提示词扩写</label></div>
       </div>
@@ -472,7 +488,15 @@ dialog::backdrop{background:var(--overlay)}
           </select>
         </div>
         <div class="field"><label for="nodeLabel">输入说明</label><input id="nodeLabel" maxlength="64" placeholder="例如：角色参考图"></div>
+        <div class="field"><label for="nodeInputKey">输入别名（可选）</label><input id="nodeInputKey" maxlength="80" placeholder="例如：subject 或 first_frame"></div>
+        <div class="field"><label for="nodeRole">素材用途（可选）</label><input id="nodeRole" maxlength="200" placeholder="例如：人物主体、风格、首帧"></div>
         <div class="field full"><label for="nodeValue">默认值 / 输入内容</label><input id="nodeValue" placeholder="留空则运行时由用户提供或等待上传"></div>
+        <div class="field full"><label class="check-row"><input type="checkbox" id="nodeRequired"> 必填输入（没有默认值时需补充，必填文件不能跳过）</label></div>
+        <div class="field full"><div class="hint">输入说明也用于自然语言识别图片角色，例如“人物参考图”“风格参考图”。以下约束仅用于可编辑配置。</div></div>
+        <div class="field"><label for="nodeParamType">参数数据类型</label><select id="nodeParamType"><option value="string">文本</option><option value="integer">整数</option><option value="number">数值</option><option value="boolean">开关（true / false）</option></select></div>
+        <div class="field"><label for="nodeMin">数值下限</label><input type="number" step="any" id="nodeMin" placeholder="不限制"></div>
+        <div class="field"><label for="nodeMax">数值上限</label><input type="number" step="any" id="nodeMax" placeholder="不限制"></div>
+        <div class="field full"><label for="nodeChoices">允许的参数值（每行一个，留空不限制）</label><textarea id="nodeChoices" rows="3" placeholder="1:1&#10;16:9&#10;9:16"></textarea></div>
         <div class="field full"><div class="hint" id="nodeTypeHint"></div></div>
       </div>
     </div>
@@ -525,13 +549,20 @@ dialog::backdrop{background:var(--overlay)}
 
 <dialog id="clearTasksDialog">
   <div class="dialog">
-    <div class="dialog-head"><h3>清空任务记录？</h3></div>
-    <div class="dialog-body"><p id="clearTasksText" style="color:var(--muted);margin:0">这会删除插件保存的最近任务记录，RunningHub 平台上的账单不会受影响。</p></div>
+    <div class="dialog-head"><h3>清理已结束的任务？</h3></div>
+    <div class="dialog-body"><p id="clearTasksText" style="color:var(--muted);margin:0">只隐藏已结束的记录，正在进行的任务保留。原任务仍可按编号补发，RunningHub 账单不受影响。</p></div>
     <div class="dialog-foot">
       <button class="btn text" id="clearTasksCancelBtn">取消</button>
-      <button class="btn danger-text" id="clearTasksOkBtn">清空</button>
+      <button class="btn danger-text" id="clearTasksOkBtn">清理</button>
     </div>
   </div>
+</dialog>
+<dialog id="taskSelectionDialog">
+  <form method="dialog" class="dialog">
+    <div class="dialog-head"><h3>选择补发结果</h3></div>
+    <div class="dialog-body field"><label for="taskSelection">结果序号</label><input id="taskSelection" placeholder="如 2 或 1,3；all 表示全部" autocomplete="off"><p class="hint">留空优先补发未送达项。结果发送到任务原会话。</p></div>
+    <div class="dialog-foot"><button class="btn text" value="cancel">取消</button><button class="btn filled" value="send">补发</button></div>
+  </form>
 </dialog>
 
 
@@ -560,7 +591,7 @@ const taskHistoryState = { records: [], loading: false, loaded: false, updatedAt
 let currentTab = "workflows";
 let workflowDialogIndex = -1;
 let nodeDialogState = { wf: -1, node: -1 };
-let analyzeState = { wf: -1, nodes: [], method: "" };
+let analyzeState = { wf: -1, nodes: [], method: "", settings: {} };
 let confirmResolver = null;
 
 const $ = (id) => document.getElementById(id);
@@ -659,24 +690,40 @@ function taskRowMarkup(record) {
   const taskId = esc(record.task_id || "");
   const workflow = record.workflow || "";
   const coins = esc(formatTaskCoins(record.coins));
+  const elapsed = record.elapsed_seconds == null ? "耗时未知" : record.elapsed_seconds < 60 ? `${record.elapsed_seconds} 秒` : `${Math.floor(record.elapsed_seconds / 60)} 分 ${record.elapsed_seconds % 60} 秒`;
+  const queue = record.queue_position ? ` · 等待序位 ${record.queue_position}` : "";
+  const labels = {cancel:"取消", resume:"恢复查询", resend:"补发"};
+  const operations = (record.actions || []).map(action => `<button class="btn text small" data-task="${taskId}" data-action="${esc(action)}" ${record.busy ? "disabled" : ""}>${labels[action] || ""}</button>`).join("");
+  const detail = [record.message, ...(record.errors || []), record.remote_task_id ? `平台编号：${record.remote_task_id}` : "", record.action_message || ""].filter(Boolean).map(esc).join("<br>");
   return `<div class="task-row">
     <div class="task-id" title="点击复制任务 ID" data-copy="${taskId}">${taskId}<span class="copy-hint">复制</span></div>
     <div class="task-workflow"><span class="chip">${workflow ? esc(workflow) : "未记录工作流"}</span></div>
+    <div class="task-progress"><b>${esc(record.status_label || "历史记录")}</b>${esc(queue)}<small>${esc(record.stage_label || "")} · ${record.queue_position ? "已等待 " : ""}${elapsed}</small>${record.output_count ? `<small>已送达 ${record.sent_count}/${record.output_count} 项</small>` : ""}</div>
     <div class="task-coins"><span class="coin-icon"><span class="icon icon-wallet" style="width:14px;height:14px" aria-hidden="true"></span></span><b>${coins}</b><span>RH 币</span></div>
+    <div class="task-operations">${record.busy ? "处理中…" : operations}</div>
+    ${detail ? `<details class="task-detail" data-details="${taskId}"><summary>查看详情</summary>${detail}</details>` : ""}
   </div>`;
 }
 function renderTaskHistory() {
-  const records = taskHistoryState.records;
-  const total = records.reduce((sum, item) => sum + taskCoinValue(item.coins), 0);
-  $("taskStatCount").textContent = String(records.length);
+  const all = taskHistoryState.records;
+  const filter = $("taskFilter").value;
+  const active = ["queued", "submitting", "pending"];
+  const attention = ["tracking_paused", "needs_attention", "unknown_submission"];
+  const records = all.filter(r => filter === "all" || (filter === "active" && active.includes(r.status)) || (filter === "attention" && (attention.includes(r.status) || ["partial", "uncertain"].includes(r.delivery_status))) || (filter === "ended" && ["success", "failed", "cancelled"].includes(r.status)));
+  const total = all.reduce((sum, item) => sum + taskCoinValue(item.coins), 0);
+  $("taskStatCount").textContent = String(all.length);
   $("taskStatTotal").textContent = formatTaskCoins(total);
   $("taskStatUpdated").textContent = taskHistoryState.updatedAt || "—";
   $("taskCountLabel").textContent = records.length ? `共 ${records.length} 条` : "";
+  const expanded = new Set([...$("taskList").querySelectorAll("details[open]")].map(el => el.dataset.details));
   $("taskList").innerHTML = records.map(taskRowMarkup).join("");
+  $("taskList").querySelectorAll("details").forEach(el => { el.open = expanded.has(el.dataset.details); });
   $("taskEmptyState").classList.toggle("hidden", records.length > 0);
-  $("taskClearBtn").disabled = taskHistoryState.loading || records.length === 0;
+  $("taskClearBtn").disabled = taskHistoryState.loading || !all.some(r => ["success", "failed", "cancelled"].includes(r.status));
+  $("taskActivity").textContent = taskHistoryState.error || `运行和排队 ${all.filter(r => active.includes(r.status)).length} · 需处理 ${all.filter(r => attention.includes(r.status) || ["partial", "uncertain"].includes(r.delivery_status)).length} · 每 5 秒刷新。补发发送到原会话。`;
 }
-async function loadTaskHistory() {
+async function loadTaskHistory(quiet = false) {
+  if (taskHistoryState.loading) return;
   taskHistoryState.loading = true;
   $("taskRefreshBtn").disabled = true;
   renderTaskHistory();
@@ -685,10 +732,12 @@ async function loadTaskHistory() {
     if (!res || res.success === false) throw new Error(res?.message || "读取任务记录失败");
     taskHistoryState.records = Array.isArray(res.records) ? res.records.filter((item) => item && item.task_id) : [];
     taskHistoryState.loaded = true;
+    taskHistoryState.error = "";
     taskHistoryState.updatedAt = taskNowTime();
-    toast(`已读取 ${taskHistoryState.records.length} 条任务记录`, "ok", 1800);
+    if (!quiet) toast(`已读取 ${taskHistoryState.records.length} 条任务记录`, "ok", 1800);
   } catch (err) {
-    toast(String(err?.message || err), "err", 6000);
+    if (!quiet) toast(String(err?.message || err), "err", 6000);
+    taskHistoryState.error = `刷新失败：${String(err?.message || err)}`;
   } finally {
     taskHistoryState.loading = false;
     $("taskRefreshBtn").disabled = false;
@@ -701,14 +750,43 @@ async function clearTaskHistory() {
   try {
     const res = normalizeApiResponse(await bridge.apiPost("page/tasks/clear", {}));
     if (!res || res.success === false) throw new Error(res?.message || "清空失败");
-    taskHistoryState.records = [];
-    taskHistoryState.updatedAt = taskNowTime();
-    renderTaskHistory();
+    await loadTaskHistory(true);
     toast(res.message || "任务记录已清空", "ok");
   } catch (err) {
     toast(String(err?.message || err), "err", 6000);
   } finally {
     $("clearTasksOkBtn").disabled = false;
+  }
+}
+async function performTaskAction(button) {
+  const {task: task_id, action} = button.dataset;
+  const record = taskHistoryState.records.find(r => r.task_id === task_id);
+  if (!record || record.busy) return;
+  let selection = "";
+  if (action === "resend" && record.output_count > 1) {
+    selection = await new Promise(resolve => {
+      const dialog = $("taskSelectionDialog");
+      $("taskSelection").value = "";
+      dialog.returnValue = "cancel";
+      dialog.addEventListener("close", () => resolve(dialog.returnValue === "send" ? $("taskSelection").value.trim() : null), {once:true});
+      dialog.showModal();
+      $("taskSelection").focus();
+    });
+    if (selection === null) return;
+  }
+  record.busy = true;
+  renderTaskHistory();
+  try {
+    const request_id = crypto.randomUUID ? crypto.randomUUID() : `page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const res = normalizeApiResponse(await bridge.apiPost("page/tasks/action", {task_id, action, selection, request_id}));
+    if (!res || res.success === false) throw new Error(res?.message || "操作未成功");
+    toast(res.message, "ok");
+    await loadTaskHistory(true);
+  } catch (err) {
+    toast(String(err?.message || err), "err", 6000);
+  } finally {
+    record.busy = false;
+    renderTaskHistory();
   }
 }
 async function copyTaskId(text) {
@@ -754,14 +832,22 @@ function toast(message, type = "info", duration = 3200) {
   const el = document.createElement("div");
   el.className = `toast ${type === "ok" ? "ok" : type === "err" ? "err" : type === "warn" ? "warn" : ""}`;
   el.textContent = message;
-  $("toasts").appendChild(el);
+  el.setAttribute("role", type === "err" ? "alert" : "status");
+  const activeDialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+  if (activeDialog) {
+    el.style.margin = "8px 20px";
+    el.style.flexShrink = "0";
+    activeDialog.querySelector(".dialog-foot").before(el);
+  } else {
+    $("toasts").appendChild(el);
+  }
   setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 220); }, duration);
 }
 function setDirty(dirty) {
   state.dirty = dirty;
   $("dirtyBadge").classList.toggle("show", dirty);
   $("saveBtn").disabled = state.saving || !dirty;
-  $("saveBtn").textContent = dirty ? "保存配置 ●" : "保存配置";
+  $("saveBtn").textContent = state.saving ? "保存中…" : dirty ? "保存配置 ●" : "保存配置";
 }
 function inferType(fieldName) {
   const f = String(fieldName || "").toLowerCase();
@@ -792,15 +878,72 @@ function normalizeNode(raw) {
   return {
     node_id: String(raw?.node_id || "").trim(),
     field_name: String(raw?.field_name || "prompt").trim() || "prompt",
-    field_value: String(raw?.field_value || ""),
+    field_value: String(raw?.field_value ?? ""),
     value_type: valueType === "auto" ? "" : valueType,
-    label: String(raw?.label || "").trim()
+    label: String(raw?.label || "").trim(),
+    input_key: String(raw?.input_key || "").trim(),
+    role: String(raw?.role || "").trim(),
+    required: Boolean(raw?.required),
+    param_type: raw?.param_type || "string",
+    minimum: raw?.minimum === "" || raw?.minimum == null ? null : Number(raw.minimum),
+    maximum: raw?.maximum === "" || raw?.maximum == null ? null : Number(raw.maximum),
+    choices: Array.isArray(raw?.choices) ? raw.choices.map(String) : []
   };
 }
 function validateNode(raw) {
   const node = normalizeNode(raw);
-  if (!node.node_id) return { ok: false, message: "节点 ID 不能为空", node };
+  const fail = (message, field = "nodeValue") => ({ ok: false, message, node, field });
+  if (!node.node_id) return fail("节点 ID 不能为空", "nodeId");
+  const kind = effectiveType(node);
+  const bounds = node.minimum != null || node.maximum != null;
+  if (kind === "default" && node.required && !node.field_value.trim()) return fail("固定默认值标为必填时必须填写默认值；需要用户提供时请修改节点类型");
+  if (kind !== "text") {
+    if (bounds || node.choices.length || node.param_type !== "string") return fail("参数类型、范围和允许值仅用于可编辑配置，请清除这些约束或修改节点类型", "nodeType");
+    return { ok: true, node };
+  }
+  if (bounds && !["integer", "number"].includes(node.param_type)) return fail("只有整数或数值参数可以设置数值范围", "nodeParamType");
+  if ((node.minimum != null && !Number.isFinite(node.minimum)) || (node.maximum != null && !Number.isFinite(node.maximum))) return fail("参数范围必须是有效数字", "nodeMin");
+  if (node.minimum != null && node.maximum != null && node.minimum > node.maximum) return fail("数值下限不能大于上限", "nodeMin");
+  function valueError(value) {
+    if (["integer", "number"].includes(node.param_type)) {
+      if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value)) return "需要有效数字";
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "需要有限数字";
+      if (node.param_type === "integer" && !Number.isInteger(number)) return "需要整数";
+      if (node.minimum != null && number < node.minimum) return `不能小于 ${node.minimum}`;
+      if (node.maximum != null && number > node.maximum) return `不能大于 ${node.maximum}`;
+    }
+    if (node.param_type === "boolean" && !["true", "false", "1", "0"].includes(value.toLowerCase())) return "只能填写 true、false、1 或 0";
+    return "";
+  }
+  for (const choice of node.choices) {
+    const error = valueError(choice);
+    if (error) return fail(`允许值「${choice}」${error}`, "nodeChoices");
+  }
+  const value = node.field_value.trim();
+  if (value) {
+    const error = valueError(value);
+    if (error) return fail(`默认值${error}`);
+    // Python validates choices and canonicalizes short labels and numeric values.
+  }
   return { ok: true, node };
+}
+
+function validateAllWorkflows() {
+  for (let w = 0; w < state.workflows.length; w++) {
+    const wf = state.workflows[w], seen = new Set();
+    let prompts = 0;
+    for (let n = 0; n < wf.nodes.length; n++) {
+      const check = validateNode(wf.nodes[n]);
+      const key = `${check.node.node_id}/${check.node.field_name}`;
+      let message = check.ok ? "" : check.message;
+      if (seen.has(key)) message = "节点 ID 和字段名重复";
+      seen.add(key);
+      if (effectiveType(check.node) === "prompt" && ++prompts > 1) message = "最多只能有一个主提示词节点";
+      if (message) return { wf: w, node: n, field: check.field, message: `工作流「${wf.name}」第 ${n + 1} 项（${key}）：${message}` };
+    }
+  }
+  return null;
 }
 
 function filterWorkflows() {
@@ -812,7 +955,7 @@ function filterWorkflows() {
       if (!q) return { wf, index, nodes: wf.nodes };
       const wfHit = [wf.name, wf.workflow_id].some((v) => String(v).toLowerCase().includes(q));
       const nodes = wfHit ? wf.nodes : wf.nodes.filter((node) =>
-        [node.node_id, node.field_name, node.label, node.field_value, node.value_type]
+        [node.node_id, node.field_name, node.label, node.input_key, node.role, node.field_value, node.value_type]
           .some((v) => String(v).toLowerCase().includes(q))
       );
       return nodes.length ? { wf, index, nodes } : null;
@@ -944,7 +1087,7 @@ function updateTemplateHint() {
   const path = $("wfTemplate").value;
   const t = state.templates.find((item) => item.path === path);
   const hint = $("wfTemplateHint");
-  if (!path) hint.textContent = "未选择模板；模板存放在插件 prompt/ 目录。";
+  if (!path) hint.textContent = "未选择模板；上传模板保存在插件持久化数据目录，更新插件时保留。";
   else if (t) hint.textContent = `${t.name} · ${formatSize(t.size)}`;
   else hint.textContent = `自定义路径：${path}`;
 }
@@ -1017,6 +1160,9 @@ function openWorkflowDialog(index) {
   const wf = index >= 0 ? state.workflows[index] : null;
   $("workflowDialogTitle").textContent = wf ? "编辑工作流" : "新建工作流";
   $("wfName").value = wf?.name || "";
+  $("wfDescription").value = wf?.description || "";
+  $("wfOutputType").value = wf?.output_type || "auto";
+  $("wfLlmEnabled").checked = wf?.llm_enabled !== false;
   $("wfId").value = wf?.workflow_id || "";
   $("wfInstance").value = wf?.instance_type || "Standard";
   $("wfRegion").value = wf?.region || "overseas";
@@ -1033,7 +1179,11 @@ function saveWorkflowFromDialog() {
   const duplicate = state.workflows.findIndex((wf, i) => wf.name === name && i !== workflowDialogIndex);
   if (duplicate >= 0) return toast(`工作流名称「${name}」已存在`, "err");
   const data = {
+    ...(workflowDialogIndex >= 0 ? clone(state.workflows[workflowDialogIndex]) : {}),
     name,
+    description: $("wfDescription").value.trim(),
+    llm_enabled: $("wfLlmEnabled").checked,
+    output_type: $("wfOutputType").value,
     workflow_id: workflowId,
     instance_type: $("wfInstance").value,
     region: $("wfRegion").value,
@@ -1068,6 +1218,13 @@ function openNodeDialog(wfIndex, nodeIndex) {
   $("nodeValue").value = node?.field_value || "";
   $("nodeType").value = node?.value_type || "";
   $("nodeLabel").value = node?.label || "";
+  $("nodeInputKey").value = node?.input_key || "";
+  $("nodeRole").value = node?.role || "";
+  $("nodeRequired").checked = Boolean(node?.required);
+  $("nodeParamType").value = node?.param_type || "string";
+  $("nodeMin").value = node?.minimum ?? "";
+  $("nodeMax").value = node?.maximum ?? "";
+  $("nodeChoices").value = (node?.choices || []).join("\n");
   updateNodeTypeHint();
   $("nodeDialog").showModal();
 }
@@ -1078,9 +1235,16 @@ function saveNodeFromDialog() {
     field_name: $("nodeField").value,
     field_value: $("nodeValue").value,
     value_type: $("nodeType").value,
-    label: $("nodeLabel").value
+    label: $("nodeLabel").value,
+    input_key: $("nodeInputKey").value,
+    role: $("nodeRole").value,
+    required: $("nodeRequired").checked,
+    param_type: $("nodeParamType").value,
+    minimum: $("nodeMin").value,
+    maximum: $("nodeMax").value,
+    choices: $("nodeChoices").value.split("\n").map(s => s.trim()).filter(Boolean)
   });
-  if (!check.ok) return toast(check.message, "err");
+  if (!check.ok) { $(check.field || "nodeValue").focus(); return toast(check.message, "err"); }
   const targetName = $("nodeWorkflow").value;
   let wfIndex = state.workflows.findIndex((wf) => wf.name === targetName);
   if (wfIndex < 0) wfIndex = nodeDialogState.wf;
@@ -1130,15 +1294,23 @@ async function loadConfig() {
 
 async function saveConfig() {
   if (state.saving) return;
+  const invalid = validateAllWorkflows();
+  if (invalid) {
+    openNodeDialog(invalid.wf, invalid.node);
+    if (invalid.field) $(invalid.field).focus();
+    toast(invalid.message, "err", 7000);
+    return;
+  }
   state.saving = true;
   $("saveBtn").disabled = true;
   $("saveBtn").textContent = "保存中…";
+  const submitted = clone(state.workflows);
   try {
-    const res = normalizeApiResponse(await bridge.apiPost("page/config", { workflows: state.workflows }));
+    const res = normalizeApiResponse(await bridge.apiPost("page/config", { workflows: submitted }));
     if (!res || res.success === false) throw new Error(res?.message || "保存失败");
-    state.original = clone(state.workflows);
-    setDirty(false);
-    toast(res.message || `已保存 ${res.workflow_nodes || 0} 个节点`, "ok");
+    state.original = submitted;
+    setDirty(JSON.stringify(state.workflows) !== JSON.stringify(submitted));
+    toast(state.dirty ? "本次配置已保存；保存期间的新修改尚未保存" : res.message || `已保存 ${res.workflow_nodes || 0} 个节点`, "ok");
   } catch (err) {
     toast(String(err?.message || err), "err", 5000);
   } finally {
@@ -1163,8 +1335,18 @@ async function runAnalyze() {
     if (!res || res.success === false) throw new Error(res?.message || "识别失败");
     analyzeState.nodes = (res.nodes || []).map(normalizeNode).filter((n) => n.node_id);
     analyzeState.method = res.method || "";
+    analyzeState.settings = {};
+    if (res.settings && typeof res.settings === "object" && !Array.isArray(res.settings)) {
+      for (const key of ["description", "llm_template_path", "output_type", "capability", "cost_hint", "prompt_profile"]) {
+        if (typeof res.settings[key] === "string") analyzeState.settings[key] = res.settings[key];
+      }
+      if (typeof res.settings.llm_enhance === "boolean") analyzeState.settings.llm_enhance = res.settings.llm_enhance;
+    }
+    const presetHint = Object.keys(analyzeState.settings).length
+      ? '<div class="hint" style="margin-bottom:8px">已匹配内置预设：替换节点时同时应用用途、扩写模板和输出设置；添加节点会保留现有工作流设置。</div>' : "";
     $("azResult").innerHTML = analyzeState.nodes.length
       ? `<div class="muted" style="margin-bottom:8px">识别方式：${esc(analyzeState.method)} · 共 ${analyzeState.nodes.length} 个候选节点</div>` +
+        presetHint +
         `<div class="analyze-selectbar"><label><input type="checkbox" id="azSelectAll" checked> 全选</label><span class="spacer"></span><span id="azSelectedCount"></span></div>` +
         analyzeState.nodes.map((n, i) =>
           `<label class="node-chip selectable"><input type="checkbox" data-az-node="${i}" checked> ${esc(n.node_id)} · ${esc(n.field_name)} · ${esc(typeMeta(effectiveType(n)).label)}${n.label ? ` · ${esc(n.label)}` : ""}</label>`
@@ -1175,6 +1357,8 @@ async function runAnalyze() {
     updateAnalyzeSelection();
     toast(`识别完成：${analyzeState.nodes.length} 个候选节点，请勾选要添加的节点`, "ok");
   } catch (err) {
+    analyzeState.nodes = [];
+    analyzeState.settings = {};
     $("azResult").innerHTML = `<div class="muted" style="color:var(--danger)">${esc(String(err?.message || err))}</div>`;
     $("azReplaceBtn").hidden = true;
     $("azMergeBtn").hidden = true;
@@ -1207,11 +1391,22 @@ function applyAnalyze(mode) {
     toast("请先勾选要添加的节点", "warn");
     return;
   }
+  const preserveInputMetadata = (node) => {
+    const previous = wf.nodes.find((n) => n.node_id === node.node_id && n.field_name === node.field_name);
+    return {
+      ...clone(node),
+      input_key: node.input_key || previous?.input_key || "",
+      role: node.role || previous?.role || ""
+    };
+  };
+  const appliedNodes = selected.map(preserveInputMetadata);
+  const appliedPreset = mode === "replace" && Object.keys(analyzeState.settings).length > 0;
   mutate(() => {
     if (mode === "replace") {
-      wf.nodes = clone(selected);
+      wf.nodes = appliedNodes;
+      if (appliedPreset) Object.assign(wf, clone(analyzeState.settings));
     } else {
-      for (const node of selected) {
+      for (const node of appliedNodes) {
         const index = wf.nodes.findIndex((n) => n.node_id === node.node_id && n.field_name === node.field_name);
         if (index >= 0) wf.nodes[index] = node;
         else wf.nodes.push(node);
@@ -1219,13 +1414,13 @@ function applyAnalyze(mode) {
     }
   });
   $("analyzeDialog").close();
-  toast(mode === "replace" ? "已替换为选中节点" : `已添加 ${selected.length} 个选中节点`, "ok");
+  toast(appliedPreset ? "已替换节点并应用内置预设配置（记得保存）" : mode === "replace" ? "已替换为选中节点" : `已添加 ${selected.length} 个选中节点，保留现有工作流设置`, "ok");
 }
 
 function openAnalyzeDialog(wfIndex) {
   const wf = state.workflows[wfIndex];
   if (!wf) return;
-  analyzeState = { wf: wfIndex, nodes: [], method: "" };
+  analyzeState = { wf: wfIndex, nodes: [], method: "", settings: {} };
   $("azWorkflowName").textContent = `${wf.name} · ${wf.workflow_id}`;
   $("azRegion").value = wf.region === "domestic" ? "domestic" : "overseas";
   $("azDetailed").checked = false;
@@ -1365,9 +1560,13 @@ $("pageTabs").addEventListener("click", (event) => {
   const tab = event.target.closest(".page-tab")?.dataset?.tab;
   if (tab) switchTab(tab);
 });
-$("taskRefreshBtn").addEventListener("click", loadTaskHistory);
+$("taskRefreshBtn").addEventListener("click", () => loadTaskHistory());
+$("taskFilter").addEventListener("change", renderTaskHistory);
+setInterval(() => { if (currentTab === "tasks" && !document.hidden) loadTaskHistory(true); }, 5000);
 $("taskClearBtn").addEventListener("click", () => $("clearTasksDialog").showModal());
 $("taskList").addEventListener("click", (event) => {
+  const action = event.target.closest("[data-action]");
+  if (action) { performTaskAction(action); return; }
   const target = event.target.closest("[data-copy]");
   if (target) copyTaskId(target.getAttribute("data-copy"));
 });

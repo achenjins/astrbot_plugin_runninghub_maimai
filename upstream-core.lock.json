@@ -1,0 +1,94 @@
+{
+  "format_version": 1,
+  "repository": "https://github.com/achenjins/runninghub-workflow-adapter.git",
+  "commit": "622ec075e64683556d094de2ea17fdbe5584521f",
+  "destination": "rh_generic_lib/upstream",
+  "files": {
+    "__init__.py": {
+      "source": "rh_generic_lib/__init__.py",
+      "source_sha256": "7e674db8dfbd86d87c1c2e6d1dc9b30648c7e82f0840cb6f1d47945b23912e6f",
+      "sha256": "7e674db8dfbd86d87c1c2e6d1dc9b30648c7e82f0840cb6f1d47945b23912e6f",
+      "transforms": []
+    },
+    "background_io.py": {
+      "source": "rh_generic_lib/background_io.py",
+      "source_sha256": "dc645af1e3181d408ea92a396473f2742dcd1d422acc1ac5ca767a6fb716e397",
+      "sha256": "dc645af1e3181d408ea92a396473f2742dcd1d422acc1ac5ca767a6fb716e397",
+      "transforms": []
+    },
+    "runninghub_client.py": {
+      "source": "rh_generic_lib/runninghub_client.py",
+      "source_sha256": "ea7f13a5800746389e740eb34bfe0639902ada217d2f3cba6518a7531a00bd1f",
+      "sha256": "ea7f13a5800746389e740eb34bfe0639902ada217d2f3cba6518a7531a00bd1f",
+      "transforms": []
+    },
+    "workflow_runner.py": {
+      "source": "rh_generic_lib/workflow_runner.py",
+      "source_sha256": "570e3597439669add3d1c3524e7098b6f41f7122f67194818bb8aed6343837bf",
+      "sha256": "570e3597439669add3d1c3524e7098b6f41f7122f67194818bb8aed6343837bf",
+      "transforms": []
+    },
+    "workflow_presets.py": {
+      "source": "rh_generic_lib/workflow_presets.py",
+      "source_sha256": "653121a1309b0c47d876c17bc2be385f5bf0421d9385458542c5674d06e5a667",
+      "sha256": "653121a1309b0c47d876c17bc2be385f5bf0421d9385458542c5674d06e5a667",
+      "transforms": []
+    },
+    "media_plan.py": {
+      "source": "rh_generic_lib/media_plan.py",
+      "source_sha256": "69552872c3d3766821025070a320be74dff6f9ac8faede6d035c895d951ed403",
+      "sha256": "69552872c3d3766821025070a320be74dff6f9ac8faede6d035c895d951ed403",
+      "transforms": []
+    },
+    "task_queue.py": {
+      "source": "rh_generic_lib/task_queue.py",
+      "source_sha256": "f96d2a320c6b9be123a03e0b73b070a4c321c25f04b6c17dfea10a079c3fef1a",
+      "sha256": "f96d2a320c6b9be123a03e0b73b070a4c321c25f04b6c17dfea10a079c3fef1a",
+      "transforms": []
+    },
+    "image_memory.py": {
+      "source": "rh_generic_lib/image_memory.py",
+      "source_sha256": "f4d4b6116a6691913197acd10d2274d65354041bf947dbac75feb165c845f8fc",
+      "sha256": "f4d4b6116a6691913197acd10d2274d65354041bf947dbac75feb165c845f8fc",
+      "transforms": []
+    },
+    "task_journal.py": {
+      "source": "rh_generic_lib/task_journal.py",
+      "source_sha256": "0b800c1548e7462110f3cdaf997485293b7617c4d08ab9861ccdc4e0d6eeb9c4",
+      "sha256": "0b800c1548e7462110f3cdaf997485293b7617c4d08ab9861ccdc4e0d6eeb9c4",
+      "transforms": []
+    },
+    "file_source.py": {
+      "source": "rh_generic_lib/file_source.py",
+      "source_sha256": "0b816a97a1ed8c462e194b2070d560800dd2b11c98055d207c996dc57d0dd2bc",
+      "sha256": "7f4518c30de6cad0a103994ffadd32220357937ef66781a49e3647c6a2aa65bc",
+      "transforms": [
+        "file-source-relative-client-import"
+      ]
+    },
+    "avatar_source.py": {
+      "source": "rh_generic_lib/avatar_source.py",
+      "source_sha256": "d883ae1cc8f16d5d99d25b5fc6d758d8db3d9a2154a357169a67c08cdc54a2c8",
+      "sha256": "d883ae1cc8f16d5d99d25b5fc6d758d8db3d9a2154a357169a67c08cdc54a2c8",
+      "transforms": []
+    },
+    "delivery.py": {
+      "source": "rh_generic_lib/delivery.py",
+      "source_sha256": "f1344ffa1b11018f57e9a5b1dbca3a41f43be622cdd2f8889b6ebc9c97e5a052",
+      "sha256": "f1344ffa1b11018f57e9a5b1dbca3a41f43be622cdd2f8889b6ebc9c97e5a052",
+      "transforms": []
+    },
+    "session_machine.py": {
+      "source": "rh_generic_lib/session_machine.py",
+      "source_sha256": "f2cc40501fc76fee608475d15e0634316a66ef6ac6a309c7a1e8ea407eb6d3d5",
+      "sha256": "f2cc40501fc76fee608475d15e0634316a66ef6ac6a309c7a1e8ea407eb6d3d5",
+      "transforms": []
+    },
+    "LICENSE": {
+      "source": "LICENSE",
+      "source_sha256": "49838c603a52c5ed43639b25169862d50d9e1b9571849b32530d1781b3925ac4",
+      "sha256": "49838c603a52c5ed43639b25169862d50d9e1b9571849b32530d1781b3925ac4",
+      "transforms": []
+    }
+  }
+}

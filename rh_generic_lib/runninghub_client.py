@@ -1,334 +1,58 @@
-"""RunningHub 工作流 API 客户端。
-
-封装海外版（runninghub.ai）文生图工作流的提交、查询与结果下载。
-
-对外只暴露三个异步方法：
-- ``submit``：提交任务，返回 task_id
-- ``query``：查询任务状态，SUCCESS 时返回结果列表
-- ``download_base64``：下载图片并以 base64 字符串返回
-
-所有 HTTP 请求通过 ``asyncio.to_thread`` 执行，避免阻塞插件事件循环。
-"""
-
+"""AstrBot compatibility surface for the unmodified upstream HTTP client."""
 from __future__ import annotations
 
-import asyncio
 import base64
-import json
+import copy
 from typing import Any
 
-import requests
+from .upstream.runninghub_client import (
+    RunningHubBusyError, RunningHubClient as _Client, RunningHubError,
+    RunningHubRateLimitError, RunningHubTaskError, RunningHubTransportError,
+)
 
-__all__ = ["RunningHubClient", "RunningHubError"]
+__all__ = ["RunningHubClient", "RunningHubError", "RunningHubTransportError",
+           "RunningHubBusyError", "RunningHubTaskError", "RunningHubRateLimitError"]
 
-# 下载结果/上传文件的最大字节数（512MB），防止异常或恶意超大文件一次性读入内存
-_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
-
-
-class RunningHubError(RuntimeError):
-    """RunningHub API 调用失败时抛出的异常。"""
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
-class RunningHubClient:
-    """RunningHub 工作流客户端。"""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        api_key: str,
-        workflow_id: str,
-        timeout: int = 120,
-        poll_interval: int = 10,
-        max_wait: int = 1800,
-    ) -> None:
-        self.base_url = str(base_url or "").rstrip("/")
-        self.api_key = str(api_key or "")
-        self.workflow_id = str(workflow_id or "")
-        self.timeout = int(timeout)
-        self.poll_interval = int(poll_interval)
-        self.max_wait = int(max_wait)
-
-    @staticmethod
-    def _headers(api_key: str) -> dict[str, str]:
-        return {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
-
-    async def _post(self, path: str, payload: dict[str, Any], *, use_api_key_header: bool = True) -> dict[str, Any]:
-        """异步发起 POST 请求并解析 JSON 响应。
-
-        所有 requests 异常（HTTPError/超时/断网等）统一包装为 RunningHubError，
-        避免调用方只捕获 RunningHubError 时被未捕获异常打断。
-        """
-
-        def _do() -> dict[str, Any]:
-            try:
-                response = requests.post(
-                    f"{self.base_url}{path}",
-                    json=payload,
-                    headers=self._headers(self.api_key) if use_api_key_header else {"Content-Type": "application/json"},
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-                return response.json()
-            except requests.RequestException as exc:
-                raise RunningHubError(f"请求失败: {exc}") from exc
-
-        return await asyncio.to_thread(_do)
-
-    async def submit(
-        self,
-        node_info_list: list[dict[str, Any]],
-        *,
-        instance_type: str = "Standard",
-        workflow_id: str | None = None,
-    ) -> str:
-        """提交工作流任务，返回 task_id。
-
-        Args:
-            node_info_list: 需要覆盖的节点输入列表，如
-                ``[{"nodeId": "353", "fieldName": "prompt", "fieldValue": "..."}]``。
-            instance_type: 设备类型，``Standard`` / ``Plus`` / ``Ultra``。
-            workflow_id: 目标工作流 ID；缺省使用客户端配置的工作流。
-
-        Returns:
-            str: 任务 ID。
-
-        Raises:
-            RunningHubError: 提交失败或未返回 taskId 时抛出。
-        """
-        target_workflow = str(workflow_id or self.workflow_id or "")
-        if not target_workflow:
-            raise RunningHubError("未配置 workflow_id，请检查插件配置")
-        if not self.api_key:
-            raise RunningHubError("未配置 api_key，请检查插件配置")
-
-        payload = {
-            "nodeInfoList": node_info_list or [],
-            # RunningHub 的 instanceType 期望小写（standard/plus/ultra）
-            "instanceType": str(instance_type or "Standard").lower(),
-            "usePersonalQueue": "false",
-        }
-        result = await self._post(f"/openapi/v2/run/workflow/{target_workflow}", payload)
-        task_id = result.get("taskId")
-        if not task_id:
-            error_message = result.get("errorMessage") or ""
-            raise RunningHubError(f"提交任务失败: {error_message or json.dumps(result, ensure_ascii=False)}")
-        return str(task_id)
-
-    async def query(self, task_id: str) -> dict[str, Any]:
-        """查询任务状态。
-
-        Returns:
-            dict: 原始响应，``status`` 字段取值为
-                ``QUEUED`` / ``RUNNING`` / ``SUCCESS`` / ``FAILED`` / ``ERROR`` /
-                ``CANCEL`` 等，SUCCESS 时 ``results`` 列表包含 ``url`` 等结果字段。
-        """
-        return await self._post("/openapi/v2/query", {"taskId": str(task_id)})
+class RunningHubClient(_Client):
+    """Keep AstrBot's account query and per-download limits without forking HTTP logic."""
 
     async def account_status(self) -> dict[str, Any]:
-        """查询账户状态（RH 币余额、钱包、当前运行任务数等）。
-
-        Returns:
-            dict: 响应里的 ``data`` 对象，包含 ``remainCoins`` / ``remainMoney`` /
-                ``currentTaskCounts`` / ``currency`` / ``apiType`` 等字段。
-
-        Raises:
-            RunningHubError: 未配置 API Key 或接口返回错误码时抛出。
-        """
         if not self.api_key:
             raise RunningHubError("未配置 API Key")
         result = await self._post("/uc/openapi/accountStatus", {"apikey": self.api_key})
-        code = result.get("code")
-        if code not in (0, 200, None):
-            raise RunningHubError(
-                f"获取账户信息失败: {result.get('msg') or result.get('message') or result}"
-            )
-        data = result.get("data")
-        if not isinstance(data, dict):
+        if not isinstance(result, dict):
+            raise RunningHubError("API 响应不是 JSON 对象")
+        if result.get("code") not in (0, 200, None):
+            raise RunningHubError(f"获取账户信息失败: {result.get('msg') or result.get('message') or result}")
+        if not isinstance(result.get("data"), dict):
             raise RunningHubError("获取账户信息失败: 响应缺少 data")
-        return data
+        return result["data"]
 
-    async def cancel(self, task_id: str) -> dict[str, Any]:
-        """取消任务（POST /task/openapi/cancel）。
-
-        Args:
-            task_id: 要取消的任务 ID。
-
-        Returns:
-            dict: 原始响应，code 为 0/200 表示取消成功。
-        """
-        payload = {
-            "apiKey": self.api_key,
-            "taskId": str(task_id),
-        }
-        return await self._post("/task/openapi/cancel", payload)
+    async def download_bytes(self, url: str, *, max_bytes: int | None = None) -> bytes:
+        # A per-call view shares the Session, without racing another download's limit.
+        view = copy.copy(self)
+        if max_bytes is not None:
+            view.max_file_bytes = min(self.max_file_bytes, max(1, int(max_bytes)))
+        return await _Client.download_bytes(view, url)
 
     async def download_base64(self, url: str) -> str:
-        """下载图片并以 base64 字符串返回（供 send.image 使用）。"""
-        content = await self.download_bytes(url)
-        return base64.b64encode(content).decode("ascii")
+        data = await self.download_bytes(url, max_bytes=MAX_IMAGE_BYTES)
+        return base64.b64encode(data).decode("ascii")
 
-    async def download_bytes(self, url: str) -> bytes:
-        """下载文件并返回原始字节（供二次上传使用），带最大字节数限制。"""
-
-        def _do() -> bytes:
-            try:
-                headers = {
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                }
-                response = requests.get(url, timeout=self.timeout, stream=True, headers=headers)
-                response.raise_for_status()
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > _MAX_DOWNLOAD_BYTES:
-                        raise RunningHubError(
-                            f"下载内容超过 {_MAX_DOWNLOAD_BYTES} 字节上限，已拒绝"
-                        )
-                    chunks.append(chunk)
-                return b"".join(chunks)
-            except requests.RequestException as exc:
-                raise RunningHubError(f"下载失败: {exc}") from exc
-
-        return await asyncio.to_thread(_do)
-
-    async def upload_file(self, file_data: bytes, filename: str) -> str:
-        """上传文件到 RunningHub，返回工作流节点可用的 fileName（api/xxx.ext）。
-
-        这里使用工作流资源上传接口 ``POST {base_url}/task/openapi/upload``。
-        它返回 ``data.fileName``（形如 ``api/6fd...wav``），可直接作为
-        nodeInfoList 里的 fieldValue。新版 media/upload/binary 返回的
-        ``openapi/xxx`` 不是工作流节点加载路径，不能用于此场景。
-        """
-        def _do() -> dict[str, Any]:
-            try:
-                response = requests.post(
-                    f"{self.base_url}/task/openapi/upload",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    data={"apiKey": self.api_key, "fileType": "input"},
-                    files={"file": (filename, file_data)},
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-                return response.json()
-            except requests.RequestException as exc:
-                raise RunningHubError(f"上传失败: {exc}") from exc
-
-        result = await asyncio.to_thread(_do)
-        code = result.get("code")
-        # 该接口成功码为 0；个别部署也可能返回 200
-        if code not in (0, 200, None):
-            raise RunningHubError(
-                f"上传文件失败: {result.get('message') or result.get('msg') or result}"
-            )
-        data = result.get("data")
-        file_name = ""
-        if isinstance(data, dict):
-            file_name = str(data.get("fileName") or data.get("filename") or "")
-        if not file_name:
-            raise RunningHubError("上传文件失败: 响应缺少 fileName")
-        return file_name
-
+    async def wait_for_result(self, task_id: str, *, poll_interval: int | None = None,
+                              max_wait: int | None = None) -> dict[str, Any]:
+        try:
+            return await super().wait_for_result(task_id, poll_interval=poll_interval, max_wait=max_wait)
+        except RunningHubTaskError as exc:
+            # Older AstrBot callers read task_status; upstream owns status and polling.
+            exc.task_status = exc.status
+            raise
 
     async def get_workflow_json(self, workflow_id: str) -> dict[str, Any]:
-        """获取工作流完整 JSON（getJsonApiFormat 接口，官方文档规范）。
-
-        按官方文档要求：body 带 apiKey/workflowId，header 带
-        Authorization（Bearer）与 Host。
-
-        Args:
-            workflow_id: 工作流 ID。
-
-        Returns:
-            dict: 工作流 JSON（节点 ID → 节点定义）。
-
-        Raises:
-            RunningHubError: 获取失败时抛出。
-        """
-        from urllib.parse import urlparse
-
-        payload = {"apiKey": self.api_key, "workflowId": str(workflow_id)}
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-            "Host": urlparse(self.base_url).netloc,
-        }
-
-        def _do() -> dict[str, Any]:
-            try:
-                response = requests.post(
-                    f"{self.base_url}/api/openapi/getJsonApiFormat",
-                    json=payload,
-                    headers=headers,
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-                return response.json()
-            except requests.RequestException as exc:
-                raise RunningHubError(f"获取工作流失败: {exc}") from exc
-
-        result = await asyncio.to_thread(_do)
-        code = result.get("code")
-        # 兼容新旧成功码：文档为 0，新接口（如上传）实际返回 200
-        if code not in (0, 200, None):
-            raise RunningHubError(
-                f"获取工作流失败: {result.get('msg') or result.get('message') or json.dumps(result, ensure_ascii=False)[:500]}"
-            )
-        data = result.get("data") or {}
-        prompt = data.get("prompt")
-        if prompt is None:
-            raise RunningHubError(f"获取工作流失败: 响应缺少 data.prompt: {json.dumps(result, ensure_ascii=False)[:500]}")
-        import json as _json
-
         try:
-            workflow = _json.loads(prompt) if isinstance(prompt, str) else prompt
-        except Exception as exc:
-            raise RunningHubError(f"工作流 JSON 解析失败: {exc}") from exc
-        if not isinstance(workflow, dict):
-            raise RunningHubError("工作流 JSON 结构异常")
-        return workflow
-
-    async def wait_for_result(self, task_id: str, *, poll_interval: int | None = None, max_wait: int | None = None) -> dict[str, Any]:
-        """轮询等待任务完成。
-
-        Args:
-            task_id: 任务 ID。
-            poll_interval: 轮询间隔秒数，默认使用客户端配置。
-            max_wait: 最大等待秒数，默认使用客户端配置。
-
-        Returns:
-            dict: SUCCESS 状态下的完整响应。
-
-        Raises:
-            RunningHubError: 任务失败时抛出。
-            TimeoutError: 等待超时时抛出。
-        """
-        interval = max(1, int(poll_interval if poll_interval is not None else self.poll_interval))
-        limit = max(interval, int(max_wait if max_wait is not None else self.max_wait))
-        waited = 0
-        while waited < limit:
-            result = await self.query(task_id)
-            status = str(result.get("status") or "").upper()
-            if status == "SUCCESS":
-                return result
-            # CANCEL/CANCELED 也是终态，继续轮询只会空等到超时并占用并发额度
-            if status in ("FAILED", "ERROR", "CANCEL", "CANCELED", "CANCELLED"):
-                reason = (
-                    result.get("errorMessage")
-                    or str(result.get("failedReason") or "")
-                    or (f"任务状态为 {status}" if status.startswith("CANCEL") else "")
-                    or json.dumps(result, ensure_ascii=False)[:500]
-                )
-                raise RunningHubError(f"任务执行失败: {reason}")
-            await asyncio.sleep(interval)
-            waited += interval
-        raise TimeoutError(f"任务 {task_id} 在 {limit} 秒内未完成")
+            return await super().get_workflow_json(workflow_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RunningHubError("获取工作流失败: 响应结构异常") from exc

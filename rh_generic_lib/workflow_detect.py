@@ -69,6 +69,12 @@ def safe_int(value: Any) -> int:
         return 0
 
 
+def validate_detected_prompt_nodes(nodes: list[dict[str, Any]]) -> None:
+    """Reject ambiguous primary prompts before an identified workflow is saved."""
+    if sum(str(node.get("value_type") or "").strip().lower() == "prompt" for node in nodes) > 1:
+        raise ValueError("识别出多个主提示词节点，未写入配置。请重新识别，或手动将唯一的主提示词设为 prompt，其余改为固定默认值或可编辑配置。")
+
+
 def detect_input_nodes(workflow_json: dict[str, Any]) -> list[dict[str, str]]:
     """从工作流 JSON 自动识别可能的输入节点（启发式，作为 LLM 识别的兜底）。
 
@@ -280,44 +286,4 @@ def parse_llm_nodes(response_text: str, workflow_json: dict[str, Any]) -> list[d
             }
         )
     return result or None
-
-async def _detect_input_nodes_with_llm(
-    self,
-    workflow_json: dict[str, Any],
-    *,
-    prompt_template: str | None = None,
-) -> list[dict[str, str]] | None:
-    """用内置 LLM 识别节点（失败返回 None，由调用方回退启发式）。
-
-    prompt_template 传入时使用该提示词模板（如关键节点专用模板）。
-    """
-    workflow_desc = self._describe_workflow_for_llm(workflow_json)
-    template = prompt_template or LLM_DETECT_PROMPT
-    prompt = template.format(workflow=workflow_desc)
-    try:
-        result = await self.ctx.llm.generate(
-            prompt=prompt,
-            model=self.config.feature.model,
-            temperature=0.2,
-            max_tokens=1500,
-        )
-    except Exception as exc:
-        self.ctx.logger.warning("[识别] LLM 识别调用异常，回退启发式: %s", exc, exc_info=True)
-        return None
-    if not isinstance(result, dict) or not result.get("success"):
-        self.ctx.logger.warning("[识别] LLM 识别未成功，回退启发式: %s", str(result)[:300])
-        return None
-    raw_response = str(result.get("response") or result.get("content") or "")
-    nodes = self._parse_llm_nodes(raw_response, workflow_json)
-    if not nodes:
-        self.ctx.logger.warning(
-            "[识别] LLM 输出解析/校验失败，回退启发式；原始响应: %s", raw_response[:500]
-        )
-        return None
-    self.ctx.logger.info(
-        "[识别] LLM 识别出 %d 个节点: %s",
-        len(nodes),
-        ", ".join(f"{n['node_id']}/{n['field_name']}/{n['value_type']}" for n in nodes),
-    )
-    return nodes
 

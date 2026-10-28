@@ -1,0 +1,65 @@
+name: Propose upstream core updates
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-runninghub-core
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: test
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve and import the upstream main commit
+        shell: python
+        run: |
+          import re
+          import subprocess
+          import sys
+          url = 'https://github.com/achenjins/runninghub-workflow-adapter.git'
+          result = subprocess.run(['git', 'ls-remote', '--exit-code', url, 'refs/heads/main'], check=True, capture_output=True, text=True)
+          sha = result.stdout.split()[0]
+          if not re.fullmatch(r'[0-9a-f]{40}', sha):
+              raise SystemExit('Invalid upstream main commit')
+          subprocess.run([sys.executable, 'scripts/sync_upstream_lib.py', '--ref', sha], check=True)
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python scripts/sync_upstream_lib.py --check
+      - name: Verify Pages editor behavior
+        run: node --test tests/pages_editor.test.cjs
+      - name: Run compatibility tests before proposing an update
+        run: python -B -m pytest -q
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          base: test
+          branch: automation/sync-runninghub-core
+          delete-branch: true
+          title: 'chore: synchronize shared RunningHub core'
+          commit-message: 'chore: synchronize shared RunningHub core'
+          body: |
+            Synchronize the allowlisted framework-neutral library from a verified commit of achenjins/runninghub-workflow-adapter.
+
+            The lock file records the source commit, original hashes, installed hashes and the single namespace import transformation. AstrBot adapters remain separate. Offline provenance validation and compatibility tests passed before this PR was opened.
+          add-paths: |
+            rh_generic_lib/upstream
+            upstream-core.lock.json

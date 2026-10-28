@@ -59,6 +59,54 @@
         "description": "下载结果超时（秒）",
         "type": "int",
         "default": 120
+      },
+      "max_queued": {
+        "description": "等待队列容量（0 表示不排队）",
+        "type": "int",
+        "default": 10,
+        "hint": "0–100，运行中的任务另计"
+      },
+      "query_retries": {
+        "description": "临时查询故障重试次数",
+        "type": "int",
+        "default": 3,
+        "hint": "0–10，耗尽后保留任务编号与并发名额，可用 /wf状态 恢复"
+      },
+      "max_file_mb": {
+        "description": "音频、视频与结果文件上限（MB）",
+        "type": "int",
+        "default": 64,
+        "hint": "1–512；参考图片单张最多 20MB"
+      },
+      "busy_retry_seconds": {
+        "description": "平台繁忙后重排间隔（秒）",
+        "type": "int",
+        "default": 15,
+        "hint": "仅平台明确未创建任务时重试，1–300"
+      },
+      "busy_max_wait": {
+        "description": "平台繁忙排队时限（秒）",
+        "type": "int",
+        "default": 1800,
+        "hint": "超时后放弃未创建任务，1–7200"
+      },
+      "tracking_retry_seconds": {
+        "description": "临时查询失败后等待秒数",
+        "type": "int",
+        "default": 30,
+        "hint": "1–300；继续查询已有平台编号，不重新生成"
+      },
+      "auto_resume_tracking": {
+        "description": "暂时网络错误后继续跟踪",
+        "type": "bool",
+        "default": true,
+        "hint": "仅暂时错误或查询超时自动继续；明确拒绝需手动处理"
+      },
+      "delivery_retries": {
+        "description": "明确发送失败时重试次数",
+        "type": "int",
+        "default": 2,
+        "hint": "0–5；发送状态不确定时由用户补发"
       }
     }
   },
@@ -79,10 +127,10 @@
         "hint": "0 表示不撤回"
       },
       "result_notice": {
-        "description": "完成后追加「生成完成」确认消息",
+        "description": "完成后触发机器人回复",
         "type": "bool",
         "default": true,
-        "hint": "AstrBot 没有 Maisaka 主动回复，迁移后由插件直接发送确认"
+        "hint": "结果发送后沿用原会话的模型与人格回复一次；关闭后仍记录完成状态，模型不可用时发送简短结果通知"
       },
       "use_llm": {
         "description": "用 LLM 识别输入节点与配置节点",
@@ -103,6 +151,42 @@
         "default": "",
         "hint": "留空使用默认/当前会话模型",
         "_special": "select_provider"
+      },
+      "media_history_minutes": {
+        "description": "聊天图片、任务复用与补发结果保留时间（分钟）",
+        "type": "int",
+        "default": 60,
+        "hint": "1–1440分钟；仅影响聊天短缓存和任务复用，图片记忆独立保留，历史任务仍可按日志补发（需结果链接有效）"
+      },
+      "recent_images": {
+        "description": "每用户会话的最近图片数量",
+        "type": "int",
+        "default": 20,
+        "hint": "0–20，默认20张；0关闭并清空，优先保留参考图，生成结果不挤掉原图"
+      },
+      "avatar_candidates": {
+        "description": "提供当前用户及群头像候选",
+        "type": "bool",
+        "default": true
+      },
+      "image_descriptions": {
+        "description": "为最近图片生成简短描述",
+        "type": "bool",
+        "default": true,
+        "hint": "视觉模型失败不影响原图使用"
+      },
+      "vision_model": {
+        "description": "图片描述使用的模型提供商",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空使用当前会话模型，需要支持图片输入"
+      },
+      "image_memory_hours": {
+        "description": "最近图片保留小时数",
+        "type": "int",
+        "default": 24,
+        "hint": "1–168，按最后使用时间保留；独立于短期聊天缓存"
       }
     }
   },
@@ -134,6 +218,18 @@
         "type": "list",
         "default": [],
         "hint": "管理员可用 /wf中断 中断所有人的任务"
+      },
+      "allow_plugin_api": {
+        "description": "允许其他插件调用工作流 API",
+        "type": "bool",
+        "default": false,
+        "hint": "仅影响已鉴权的 run_workflow_api；页面配置、余额与已有任务管理仍可用"
+      },
+      "natural_language_ignore_user_allowlist": {
+        "description": "自然语言调用忽略用户白名单",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时沿用 AstrBot 既有用户权限；开启后对齐 MaiBot，只检查群白名单和次数限制。身份始终来自当前事件"
       }
     }
   },
@@ -187,6 +283,45 @@
             "description": "扩写模板路径（相对插件目录）",
             "type": "string",
             "default": ""
+          },
+          "description": {
+            "description": "用途说明",
+            "type": "text",
+            "default": "",
+            "hint": "告诉模型适用场景，如人物换背景、风格参考、图生视频；模型据此选择工作流"
+          },
+          "llm_enabled": {
+            "description": "允许自然语言调用",
+            "type": "bool",
+            "default": true
+          },
+          "output_type": {
+            "description": "输出类型",
+            "type": "string",
+            "default": "auto",
+            "options": [
+              "auto",
+              "image",
+              "video",
+              "audio",
+              "file"
+            ],
+            "hint": "用于选择工作流以及平台未返回类型时的结果发送"
+          },
+          "capability": {
+            "description": "能力标识",
+            "type": "string",
+            "default": "auto"
+          },
+          "cost_hint": {
+            "description": "费用说明",
+            "type": "string",
+            "default": ""
+          },
+          "prompt_profile": {
+            "description": "提示词用途",
+            "type": "string",
+            "default": "auto"
           }
         }
       }
@@ -224,7 +359,7 @@
             "description": "默认值",
             "type": "text",
             "default": "",
-            "hint": "留空=运行时由用户提供；填写=固定默认值"
+            "hint": "主提示词和可编辑配置可覆盖默认值；固定默认值始终使用；文件节点填写后无需上传"
           },
           "value_type": {
             "description": "节点类型",
@@ -245,7 +380,55 @@
             "description": "输入说明",
             "type": "string",
             "default": "",
-            "hint": "等待用户上传时显示的中文说明"
+            "hint": "同时供模型理解输入角色，如人物参考图、风格参考图、输出宽度"
+          },
+          "required": {
+            "description": "必填输入",
+            "type": "bool",
+            "default": false,
+            "hint": "没有默认值时必须补充；必填文件不能跳过"
+          },
+          "param_type": {
+            "description": "可编辑参数的数据类型",
+            "type": "string",
+            "default": "string",
+            "options": [
+              "string",
+              "integer",
+              "number",
+              "boolean"
+            ],
+            "hint": "用于 text 节点的运行前校验"
+          },
+          "minimum": {
+            "description": "数值下限",
+            "type": "string",
+            "default": "",
+            "hint": "留空不限制；仅 integer / number 生效"
+          },
+          "maximum": {
+            "description": "数值上限",
+            "type": "string",
+            "default": "",
+            "hint": "留空不限制；仅 integer / number 生效"
+          },
+          "choices": {
+            "description": "允许的参数值",
+            "type": "list",
+            "default": [],
+            "hint": "留空不限制，如 1:1、16:9、9:16；仅 text 节点生效"
+          },
+          "input_key": {
+            "description": "输入别名",
+            "type": "string",
+            "default": "",
+            "hint": "可选，模型可按别名绑定；内部仍使用节点ID/字段名"
+          },
+          "role": {
+            "description": "素材用途",
+            "type": "string",
+            "default": "",
+            "hint": "如首帧、尾帧、主体、风格"
           }
         }
       }
