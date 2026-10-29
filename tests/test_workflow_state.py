@@ -23,8 +23,8 @@ def test_pending_input_and_auto_submission_refresh_original_tool_reply(plugin, m
         assert not pending["submitted"] and pending["phase"] == "files"
         assert pending["waiting_files"][0]["label"] == "人物参考"
         assert not json.loads(await plugin.handle_workflow_context(event(user="other")))["pending_input"]
-        blocked = await plugin.handle_run_workflow(event(mid="retry"), "改图", "油画")
-        assert "已有待补充" in blocked
+        blocked = json.loads(await plugin.handle_run_workflow(event(mid="retry"), "改图", "油画"))
+        assert blocked["status"] == "waiting_input" and blocked["pending_input"]["workflow"] == "改图"
         await plugin.handle_input_collector(event(images=1, mid="upload"))
         await finish_jobs(plugin)
         refreshed = await plugin.handle_run_workflow(original, "改图", "水彩")

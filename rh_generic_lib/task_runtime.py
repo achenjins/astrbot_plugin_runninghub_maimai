@@ -300,12 +300,36 @@ class TaskRuntimeMixin:
         except (OSError, ValueError, RunningHubError) as exc:
             return {"success": False, "message": str(exc)}
 
-    @staticmethod
-    def _job_tool_result(result):
-        return json.dumps({"task_id": result.get("task_id", ""), "status": result.get("status", "queued"),
-                           "message": result.get("message", "任务已记录，后台完成后会通知"),
-                           "notice": result.get("notice", ""),
-                           "stop_after_execution": True, "next_action": "仅提交用户明确要求的不同生成；相同内容不重提，完成后等待后台通知，不要轮询"}, ensure_ascii=False)
+    def _job_tool_result(self, result):
+        # A queued acknowledgement may already be stale when the model retries.
+        # Read local state only; never query the platform to format a tool reply.
+        if self._task_journal is not None and result.get("task_id"):
+            job = self._task_journal.get(result["task_id"])
+            if job:
+                result = {**result, **job}
+        status = result.get("status") or "unknown"
+        if status == "success":
+            next_action = "生成已成功；按 delivery 说明实际发送情况。结束本轮工具调用，不要重新生成；仅在用户明确要求时补发已有结果。"
+        elif status in {"failed", "cancelled"}:
+            next_action = "向用户说明生成失败或任务已取消，并结束本轮工具调用；不要重试或改写提示词重新生成，等待用户的新指令。"
+        elif status in {"unknown", "unknown_submission", "tracking_paused", "needs_attention"}:
+            next_action = "任务状态未确认或需要处理，按 message 如实说明并结束本轮工具调用；不要声称已完成，不要轮询或重新生成。"
+        else:
+            next_action = "本任务已接手，尚未确认生成完成；只可继续提交用户已明确要求的其他不同任务。全部接手后简短告知用户并结束本轮工具调用，等待后台通知；不要轮询、重复提交或改写提示词重提。"
+        payload = {"success": True, "accepted": True, "task_id": result.get("task_id", ""), "status": status,
+                   "duplicate": bool(result.get("duplicate")),
+                   "message": result.get("message") or f"任务状态：{status}", "next_action": next_action}
+        if result.get("notice"):
+            payload["notice"] = result["notice"]
+        if result.get("remote_task_id"):
+            payload["remote_task_id"] = result["remote_task_id"]
+        if result.get("outputs") or status == "success":
+            outputs = result.get("outputs", [])
+            payload["delivery"] = {"total": len(outputs), "sent": sum(bool(o.get("sent")) for o in outputs),
+                                   "failed": sum(bool(o.get("error")) for o in outputs),
+                                   "uncertain": sum(bool(o.get("uncertain")) for o in outputs),
+                                   "complete": result.get("delivery_status") == "sent"}
+        return json.dumps(payload, ensure_ascii=False)
 
     def _schedule_job(self, record):
         if not self._runtime_running():
@@ -418,17 +442,24 @@ class TaskRuntimeMixin:
                             node["fieldValue"] = uploaded[ref]
                     prompt_node = self._first_prompt_node(workflow)
                     if prompt_node and workflow.llm_enhance and not context.get("skip_enhance") and not record.get("submitted_nodes"):
-                        await journal.update(task_id, stage="enhancing", message="扩写提示词")
-                        original = next((n["fieldValue"] for n in nodes if n["nodeId"] == prompt_node.node_id and n["fieldName"] == prompt_node.field_name), "")
-                        enhanced = await self._enhance_text(workflow, original, stream_id=record["stream_id"],
-                                                           actual_file_desc=context.get("actual_file_desc", ""))
-                        nodes = self._patch_text_value(nodes, prompt_node.node_id, prompt_node.field_name, enhanced)
+                        if record.get("enhancement_attempted"):
+                            self.logger.warning("任务 %s 的扩写结果未确认，使用原文继续，避免重复消耗 token", task_id)
+                        else:
+                            # A cancelled/timeout request can already have been billed.
+                            # Persist the attempt before calling, just as for a paid POST.
+                            if not await journal.update(task_id, stage="enhancing", message="扩写提示词",
+                                                        enhancement_attempted=True, expected_statuses={"queued"}):
+                                return
+                            original = next((n["fieldValue"] for n in nodes if n["nodeId"] == prompt_node.node_id and n["fieldName"] == prompt_node.field_name), "")
+                            enhanced = await self._enhance_text(workflow, original, stream_id=record["stream_id"],
+                                                               actual_file_desc=context.get("actual_file_desc", ""))
+                            nodes = self._patch_text_value(nodes, prompt_node.node_id, prompt_node.field_name, enhanced)
                     allowed, reason = self._check_access(record["user_id"], record["group_id"], check_quota=False,
                                                          natural_language=bool(context.get("natural")))
                     if not allowed:
                         raise ValueError(reason)
                     if not await journal.update(task_id, status="submitting", stage="submitting", submitted_at=time.time(), message="提交 RunningHub",
-                                                expected_statuses={"queued"}):
+                                                submitted_nodes=nodes, expected_statuses={"queued"}):
                         return
                     try:
                         remote = await self._submit_remote_job(record, workflow, nodes, client)
