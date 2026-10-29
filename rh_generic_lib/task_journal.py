@@ -32,7 +32,7 @@ class TaskJournal(_TaskJournal):
         for name in ("inputs", "actions"):
             record[name] = copy.deepcopy(raw[name]) if isinstance(raw.get(name), dict) else {}
         record["submitted_nodes"] = copy.deepcopy(raw["submitted_nodes"]) if isinstance(raw.get("submitted_nodes"), list) else []
-        for name in ("inputs_ready", "hidden"):
+        for name in ("inputs_ready", "hidden", "enhancement_attempted"):
             record[name] = bool(raw.get(name))
         for name in ("started_at", "finished_at", "busy_since"):
             record[name] = raw.get(name) or 0

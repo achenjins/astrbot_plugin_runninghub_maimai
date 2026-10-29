@@ -79,16 +79,6 @@ class ImageAssetsMixin:
                 return
             previous = next((r for r in memory.list_images(owner, "images", 20)
                              if r["memory_id"] == "im-" + hashlib.sha256(data).hexdigest()), None)
-            if description is None:
-                # Even a missing description is reusable: do not repeatedly pay
-                # to inspect the same failed or unsupported image.
-                if previous is not None:
-                    description = previous["description"]
-                elif self.config.feature.image_descriptions:
-                    try:
-                        description = await self._describe_image(owner, data)
-                    except Exception as exc:
-                        self.logger.warning("图片简介不可用，继续使用原图: %s", exc)
             asset = {"media_id": ref, "type": "image", "origin": "reference"}
             try:
                 original = self._get_media_store().get(owner, ref)
@@ -100,6 +90,23 @@ class ImageAssetsMixin:
                 asset["origin"] = "result"
             if origin in {"result", "reference"}:
                 asset["origin"] = origin
+            if description is None:
+                # Even a missing description is reusable: do not repeatedly pay
+                # to inspect the same failed or unsupported image.
+                if previous is not None:
+                    description = previous["description"]
+                elif self.config.feature.image_descriptions:
+                    # Save the image before the billed request. A reload during
+                    # vision must retain the empty description as an attempted
+                    # automatic observation, rather than silently buying another.
+                    reserved = await memory.remember(owner, "images", asset, data, "", self.config.feature.recent_images)
+                    if reserved is None:
+                        return
+                    try:
+                        description = await self._describe_image(owner, data)
+                    except Exception as exc:
+                        self.logger.warning("图片简介不可用，继续使用原图: %s", exc)
+                        return reserved
             return await memory.remember(owner, "images", asset,
                                          data, description or "", self.config.feature.recent_images)
         except Exception as exc:
@@ -133,7 +140,7 @@ class ImageAssetsMixin:
                 if not summary:
                     raise ValueError("视觉模型没有返回简介")
                 self._vision_cache[key] = {"time": time.time(), "description": summary}
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 self._vision_cache[key] = {"time": time.time()}
                 raise
             finally:

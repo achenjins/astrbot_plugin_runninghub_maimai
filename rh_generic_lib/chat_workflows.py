@@ -444,13 +444,59 @@ class ChatWorkflowMixin(MediaToolsMixin):
             if result.get("success") and result.get("task_id"):
                 text = self._job_tool_result(result)
             else:
-                prefix = ("提交请求失败或未获确认，本轮不会自动重试，请核对 RunningHub 任务。"
-                          if result.get("submission_attempted") else "未提交任务：")
-                text = prefix + str(result.get("message") or "任务提交失败")
+                text = self._natural_failure_result(str(result.get("message") or "任务提交失败"),
+                                                    status="unknown" if result.get("submission_attempted") else "not_submitted")
         else:
             text = str(result)
         results[request_key] = text
         event.set_extra("rh_natural_waiting_results", results)
+
+    @staticmethod
+    def _natural_failure_result(message, *, status="not_submitted", correction_context=None):
+        uncertain = status == "unknown"
+        payload = {"success": False, "accepted": None if uncertain else False, "status": status,
+                   "message": ("任务状态未确认：" if uncertain else "未提交任务：") + message,
+                   "next_action": "向用户说明当前结果并结束本轮工具调用；不要重复重试、轮询或改写提示词重新提交。需要用户补充信息或管理员处理时，直接说明。"}
+        if correction_context:
+            payload["correction_context"] = correction_context
+            payload["next_action"] = "本次未提交；仅当 correction_context 已给出明确修正依据时可修正参数后调用一次，否则询问用户并结束本轮。不要重复相同失败请求，也不要改写生成要求来重试。"
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _natural_waiting_result(self, context, message=""):
+        pending = self._natural_pending_input(context)
+        if pending is None:
+            return self._natural_failure_result("等待补充输入的会话已结束，请用户重新发起请求")
+        if not message:
+            session = self._input_sessions[self._session_key(context["user_id"], context["stream_id"])]
+            if pending["phase"] == "uploading":
+                message = "输入正在处理，请等待自动提交。"
+            elif session.phase == "files":
+                message = self._input_prompt(session)
+            elif session.phase == "config":
+                message = self._config_prompt(session)
+            else:
+                message = "请直接发送要生成的描述文本。"
+        return json.dumps({"success": True, "accepted": False, "status": "waiting_input",
+                           "message": "尚未提交任务：" + message, "pending_input": pending,
+                           "next_action": "向用户说明所缺输入并结束本轮工具调用；用户补齐后会自动提交，不要再次 run_workflow，也无需额外查询上下文。"}, ensure_ascii=False)
+
+    def _natural_correction_context(self, event, context, workflow_name):
+        """Reuse already registered inputs; no extra discovery or task history."""
+        catalog = self._natural_workflow_catalog()
+        selected = [wf for wf in catalog if wf["name"] == str(workflow_name or "").strip()]
+        if not workflow_name and len(catalog) == 1:
+            selected = catalog
+        workflows = selected or [{k: wf[k] for k in ("name", "description", "output_type")} for wf in catalog]
+        store, owner = self._get_media_store(), MediaStore.owner(context)
+        images = []
+        for origin in ("current", "reply"):
+            for ref in event.get_extra(f"rh_images_{origin}", []):
+                try:
+                    image = store.get(owner, ref)
+                except ValueError:
+                    continue
+                images.append({"ref": ref, "source": origin, "position": image["position"]})
+        return {"workflows": workflows, "images": images}
 
     async def _run_natural_workflow_locked(self, event: Any, workflow_name: str, prompt: str = "",
                                           image_refs=None, image_bindings=None, parameters=None,
@@ -458,7 +504,7 @@ class ChatWorkflowMixin(MediaToolsMixin):
         context = self._event_ctx(event)
         allowed, message = self._check_access(context["user_id"], context["group_id"], check_quota=False, natural_language=True)
         if not allowed:
-            return "错误：" + message
+            return self._natural_failure_result(message)
         # Waiting drafts have no journal request yet. Cache only the identical
         # draft invocation; paid request deduplication belongs to the journal's
         # canonical effective request, allowing distinct runs in one message.
@@ -473,13 +519,15 @@ class ChatWorkflowMixin(MediaToolsMixin):
                 if parsed.get("task_id"):
                     job = (await self._load_task_journal()).get(parsed["task_id"])
                     if job:
-                        return self._job_tool_result(job)
+                        return self._job_tool_result({**job, "duplicate": True})
+                if parsed.get("status") == "waiting_input":
+                    return self._natural_waiting_result(context)
             except (ValueError, OSError, TypeError):
                 pass
             return cached
         pending = self._natural_pending_input(context)
         if pending:
-            return "尚未提交任务：已有待补充输入的工作流。请调用 get_workflow_context 查看 pending_input，补齐后会自动提交；更换任务请先 /wf中断。"
+            return self._natural_waiting_result(context)
         context["natural_request_key"] = signature
         try:
             response = await self._prepare_natural_run(event, context, workflow_name, prompt,
@@ -487,7 +535,7 @@ class ChatWorkflowMixin(MediaToolsMixin):
                                                        media_bindings)
             if response.get("success"):
                 if response.get("waiting"):
-                    text = "尚未提交任务：" + response["message"] + "。请向用户说明需要补充的内容，然后结束本轮工具调用。"
+                    text = self._natural_waiting_result(context, response["message"])
                     waiting_results[signature] = text
                     event.set_extra("rh_natural_waiting_results", waiting_results)
                     event.set_extra("rh_natural_waiting_request_key", signature)
@@ -495,18 +543,21 @@ class ChatWorkflowMixin(MediaToolsMixin):
                     text = self._job_tool_result(response)
                 return text
             if response.get("submission_attempted"):
-                text = "提交请求失败或未获确认，本轮不会自动重试，请核对 RunningHub 任务后再操作。" + response["message"]
-                return text
-            return json.dumps({"success": False, "message": "未提交任务：" + response["message"],
-                               "correction_context": json.loads(await self._natural_context(event))}, ensure_ascii=False)
+                return self._natural_failure_result(response["message"], status="unknown")
+            return self._natural_failure_result(response["message"])
         except asyncio.CancelledError:
             raise
-        except (ValueError, OSError) as exc:
-            return json.dumps({"success": False, "message": "未提交任务：" + str(exc),
-                               "correction_context": json.loads(await self._natural_context(event))}, ensure_ascii=False)
+        except ValueError as exc:
+            correction = None
+            if not event.get_extra("rh_natural_correction_offered", False):
+                correction = self._natural_correction_context(event, context, workflow_name)
+                event.set_extra("rh_natural_correction_offered", True)
+            return self._natural_failure_result(str(exc), correction_context=correction)
+        except OSError as exc:
+            return self._natural_failure_result(str(exc))
         except Exception as exc:
             self.logger.exception("自然语言任务准备失败")
-            return "任务准备失败，请检查图片是否仍可下载或重新发送图片。详细原因已记录日志。"
+            return self._natural_failure_result("发生异常，详细原因已记录日志，请用户核对已有任务或联系管理员", status="unknown")
 
     async def _prepare_natural_run(self, event: Any, context: dict[str, str], workflow_name: str,
                                    prompt: str, image_refs: Any, image_bindings: Any,

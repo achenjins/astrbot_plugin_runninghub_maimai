@@ -327,7 +327,7 @@ class MediaToolsMixin:
                     ref = "result:" + record["task_id"] + ":" + str(position)
                     assets.append({"media_id": ref, "ref": ref, "type": kind, "origin": "generated", "source_kind": "result",
                                    "source": url, "position": position, "task_id": record["task_id"], "created_at": stamp,
-                                   "description": f"{record['workflow']} 结果 {position}"})
+                                   "label": f"{record['workflow']} 结果 {position}"})
         unique = {}
         for asset in assets:
             if media_type and asset["type"] != media_type:
@@ -340,20 +340,22 @@ class MediaToolsMixin:
             assets = await self._media_assets(event, source, media_type)
             public = []
             for asset in assets:
-                item = {key: asset[key] for key in ("media_id", "type", "description", "position", "task_id", "recent_index",
+                item = {key: asset[key] for key in ("media_id", "type", "description", "label", "position", "task_id", "recent_index",
                                                    "memory_id", "created_at", "used_at", "expires_at") if asset.get(key)}
                 item["source"] = asset["source_kind"]
-                item["origin"] = asset["source_kind"]
+                item["origin"] = "generated" if asset.get("origin") in {"generated", "result"} else asset["source_kind"]
                 public.append(item)
             return json.dumps({"success": True, "media": public, "count": len(public),
                                "warnings": event.get_extra("rh_media_query_warnings", []),
                                "instructions": "优先按已有简介选图；无简介时不得猜画面。多份素材请按工作流用途绑定。"
-                               "memory_id 是保存原图的稳定编号。视频和音频不做视觉解码，按用户描述选择。"}, ensure_ascii=False)
+                               "label 仅是结果标签，不是画面描述。memory_id 是保存原图的稳定编号。视频和音频不做视觉解码，按用户描述选择。"}, ensure_ascii=False)
         except (ValueError, OSError) as exc:
-            return json.dumps({"success": False, "message": str(exc)}, ensure_ascii=False)
+            return json.dumps({"success": False, "message": str(exc),
+                               "next_action": "向用户说明原因并结束本轮工具调用，不要重复相同素材查询。"}, ensure_ascii=False)
         except Exception as exc:
             self.logger.warning("素材查询暂不可用: %s", exc)
-            return json.dumps({"success": False, "message": "素材查询暂不可用，请重新发送素材或稍后重试"}, ensure_ascii=False)
+            return json.dumps({"success": False, "message": "素材查询暂不可用，请用户重新发送素材或稍后发起新请求",
+                               "next_action": "向用户说明原因并结束本轮工具调用，不要重复相同素材查询。"}, ensure_ascii=False)
 
     async def _media_entry(self, owner, ref):
         if ref.startswith("med_"):
@@ -473,13 +475,15 @@ class MediaToolsMixin:
             entry = await self._validate_media_ref(owner, media_id)
             if entry["type"] != "image":
                 return json.dumps({"success": True, "media_id": media_id, "type": entry["type"],
-                                   "message": "此工具不解码视频或音频，请依据用户描述绑定用途"}, ensure_ascii=False)
+                                   "message": "此工具不解码视频或音频，请依据用户描述绑定用途",
+                                   "next_action": "按用户描述选择用途；不明确时询问用户，不要再次观察这份音视频。"}, ensure_ascii=False)
             saved = await self._find_image_memory(owner, media_id)
             if saved is not None and saved["description"]:
                 memory = await self._load_image_memory()
                 await memory.touch(owner, "images", saved["memory_id"])
                 return json.dumps({"success": True, "media_id": saved["memory_id"], "type": "image", "cached": True,
-                                   "description": saved["description"], "message": saved["description"]}, ensure_ascii=False)
+                                   "description": saved["description"], "message": saved["description"],
+                                   "next_action": "直接使用已有简介，不要重复观察同一图片。"}, ensure_ascii=False)
             client = self._client or self._client_cn
             if client is None:
                 raise ValueError("RunningHub 客户端未初始化")
@@ -496,9 +500,12 @@ class MediaToolsMixin:
                 saved = await self._remember_image_usage(owner, media_id, data, description=description)
             return json.dumps({"success": bool(description), "media_id": saved["memory_id"] if saved else media_id,
                                "type": "image", "description": description,
-                               "message": description or "图片简介暂不可用，请依据对话或询问用户；不要猜画面或重复观察"}, ensure_ascii=False)
+                               "message": description or "图片简介暂不可用，请依据对话或询问用户；不要猜画面或重复观察",
+                               "next_action": "已有简介直接使用；无简介时询问用户并结束本轮工具调用，不要重复观察同一图片。"}, ensure_ascii=False)
         except (ValueError, OSError) as exc:
-            return json.dumps({"success": False, "message": str(exc)}, ensure_ascii=False)
+            return json.dumps({"success": False, "message": str(exc),
+                               "next_action": "向用户说明原因并结束本轮工具调用；不要重复观察或编造图片内容。"}, ensure_ascii=False)
         except Exception as exc:
             self.logger.warning("图片观察暂不可用: %s", exc)
-            return json.dumps({"success": False, "message": "素材读取失败，请重新发送参考图；不要编造画面内容"}, ensure_ascii=False)
+            return json.dumps({"success": False, "message": "素材读取失败，请重新发送参考图；不要编造画面内容",
+                               "next_action": "请用户重新发送素材并结束本轮工具调用，不要重复观察当前失效素材。"}, ensure_ascii=False)

@@ -53,7 +53,7 @@ def test_queue_returns_while_upload_is_blocked_and_same_message_deduplicates(run
         await started.wait()
         second = await submit(runtime)
         assert first["task_id"] == second["task_id"]
-        assert first["stop_after_execution"] and not runtime._client.submissions
+        assert first["accepted"] and "不要轮询" in first["next_action"] and not runtime._client.submissions
         assert runtime._task_journal.path.exists()
         release.set()
         await finish_jobs(runtime)
